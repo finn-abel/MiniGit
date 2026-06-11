@@ -107,14 +107,17 @@ static void test_detached_checkout_restores_commit(void) {
     char temp_dir[MG_MAX_PATH];
     char first_hash[MG_HASH_HEX_SIZE];
     char second_hash[MG_HASH_HEX_SIZE];
+    char first_prefix[8];
     char head[MG_MAX_PATH];
-    char *checkout_args[] = {first_hash};
+    char *checkout_args[] = {first_prefix};
     char *file_contents;
 
     make_temp_dir(original_dir, temp_dir);
     assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
     commit_file("one\n", "one", first_hash);
     commit_file("two\n", "two", second_hash);
+    memcpy(first_prefix, first_hash, 7);
+    first_prefix[7] = '\0';
 
     assert_result(mg_command_checkout(1, checkout_args), MG_OK, "checkout first commit failed");
     read_text_file("file.txt", &file_contents);

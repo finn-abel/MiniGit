@@ -105,6 +105,24 @@ static void test_repo_required_commands(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_command_validation_before_repo_open(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *bad_branch_args[] = {"bad/name"};
+    char *bad_checkout_args[] = {"nope"};
+
+    make_temp_dir("commands_validation", original_dir, temp_dir);
+
+    assert_result(mg_command_add(0, NULL), MG_INVALID_ARG, "add without paths should fail before repo open");
+    assert_result(mg_command_rm(0, NULL), MG_INVALID_ARG, "rm without paths should fail before repo open");
+    assert_result(mg_command_commit(0, NULL), MG_INVALID_ARG, "commit without message should fail before repo open");
+    assert_result(mg_command_branch(1, bad_branch_args), MG_INVALID_ARG, "bad branch should fail before repo open");
+    assert_result(mg_command_switch(1, bad_branch_args), MG_INVALID_ARG, "bad switch branch should fail before repo open");
+    assert_result(mg_command_checkout(1, bad_checkout_args), MG_INVALID_ARG, "bad checkout hash should fail before repo open");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 static void test_commit_and_log_commands(void) {
     Repository repo;
     Commit commit;
@@ -178,6 +196,7 @@ static void test_branch_command_create(void) {
 
 int main(void) {
     test_repo_required_commands();
+    test_command_validation_before_repo_open();
     test_commit_and_log_commands();
     test_branch_command_create();
     puts("All commands tests passed.");

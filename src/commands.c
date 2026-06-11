@@ -190,6 +190,40 @@ static MGResult parse_commit_message(int argc, char **argv, const char **out_mes
 }
 
 /*
+ * print_invalid_branch_name gives users the v1 branch-name rules directly.
+ */
+static void print_invalid_branch_name(const char *name) {
+    if (name == NULL) {
+        puts("invalid branch name");
+        return;
+    }
+    printf("invalid branch name: %s\n", name);
+    puts("branch names cannot be empty or contain '/', '..', spaces, or control characters");
+}
+
+/*
+ * checkout_commit_arg_is_valid accepts full SHA-256 ids or v1 short prefixes.
+ */
+static int checkout_commit_arg_is_valid(const char *value) {
+    size_t len;
+
+    if (value == NULL) {
+        return 0;
+    }
+    len = strlen(value);
+    if (len < 7 || len >= MG_HASH_HEX_SIZE) {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char ch = value[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
  * tree_matches_parent reports whether the staged tree equals the parent tree.
  */
 static MGResult tree_matches_parent(const Repository *repo, const char *parent_hash, const char *tree_hash, int *out_matches) {
@@ -293,13 +327,16 @@ MGResult mg_command_init(int argc, char **argv) {
 MGResult mg_command_add(int argc, char **argv) {
     Repository repo;
     Index index;
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    MGResult result;
+
     if (argc < 1) {
         puts("usage: minigit add <path>...");
         return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
     }
 
     result = index_load(&repo, &index);
@@ -333,13 +370,16 @@ MGResult mg_command_add(int argc, char **argv) {
 MGResult mg_command_rm(int argc, char **argv) {
     Repository repo;
     Index index;
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    MGResult result;
+
     if (argc < 1) {
         puts("usage: minigit rm <path>...");
         return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
     }
 
     result = index_load(&repo, &index);
@@ -371,14 +411,17 @@ MGResult mg_command_rm(int argc, char **argv) {
  */
 MGResult mg_command_status(int argc, char **argv) {
     Repository repo;
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    MGResult result;
+
     if (argc != 0) {
         ignore_args(argc, argv);
         puts("usage: minigit status");
         return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
     }
 
     result = status_print(&repo);
@@ -400,12 +443,14 @@ MGResult mg_command_commit(int argc, char **argv) {
     char parent_hash[MG_HASH_HEX_SIZE];
     char commit_hash[MG_HASH_HEX_SIZE];
     int unchanged;
-    MGResult result = require_repo(&repo);
+    MGResult result;
+
+    result = parse_commit_message(argc, argv, &message);
     if (result != MG_OK) {
         return result;
     }
 
-    result = parse_commit_message(argc, argv, &message);
+    result = require_repo(&repo);
     if (result != MG_OK) {
         return result;
     }
@@ -467,15 +512,17 @@ MGResult mg_command_commit(int argc, char **argv) {
 MGResult mg_command_log(int argc, char **argv) {
     Repository repo;
     char current_hash[MG_HASH_HEX_SIZE];
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    MGResult result;
 
     if (argc != 0) {
         ignore_args(argc, argv);
         puts("usage: minigit log");
         return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
     }
 
     result = repo_current_commit(&repo, current_hash, sizeof(current_hash));
@@ -517,21 +564,32 @@ MGResult mg_command_log(int argc, char **argv) {
  */
 MGResult mg_command_branch(int argc, char **argv) {
     Repository repo;
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    MGResult result;
+
     if (argc == 0) {
+        result = require_repo(&repo);
+        if (result != MG_OK) {
+            return result;
+        }
         return repo_list_branches(&repo, print_branch_name, NULL);
     }
     if (argc != 1) {
         puts("usage: minigit branch [name]");
         return MG_INVALID_ARG;
     }
+    if (!repo_branch_name_is_valid(argv[0])) {
+        print_invalid_branch_name(argv[0]);
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
 
     result = repo_create_branch(&repo, argv[0]);
     if (result == MG_INVALID_ARG) {
-        puts("invalid branch name");
+        print_invalid_branch_name(argv[0]);
     } else if (result == MG_REPO_ERROR) {
         puts("cannot create branch before first commit");
     } else if (result == MG_CONFLICT) {
@@ -548,14 +606,21 @@ MGResult mg_command_branch(int argc, char **argv) {
 MGResult mg_command_switch(int argc, char **argv) {
     Repository repo;
     char branch_commit[MG_HASH_HEX_SIZE];
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    MGResult result;
+
     if (argc != 1) {
         ignore_args(argc, argv);
         puts("usage: minigit switch <branch>");
         return MG_INVALID_ARG;
+    }
+    if (!repo_branch_name_is_valid(argv[0])) {
+        print_invalid_branch_name(argv[0]);
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
     }
 
     result = repo_read_branch_commit(&repo, argv[0], branch_commit, sizeof(branch_commit));
@@ -597,27 +662,60 @@ MGResult mg_command_switch(int argc, char **argv) {
  */
 MGResult mg_command_checkout(int argc, char **argv) {
     Repository repo;
-    MGResult result = require_repo(&repo);
-    if (result != MG_OK) {
-        return result;
-    }
+    Object object;
+    char commit_hash[MG_HASH_HEX_SIZE];
+    MGResult result;
+
     if (argc != 1) {
         ignore_args(argc, argv);
-        puts("usage: minigit checkout <commit_hash>");
+        puts("usage: minigit checkout <commit>");
         return MG_INVALID_ARG;
     }
-    if (!hash_is_valid_hex(argv[0])) {
+    if (!checkout_commit_arg_is_valid(argv[0])) {
         puts("unknown commit");
         return MG_INVALID_ARG;
     }
 
-    result = checkout_commit(&repo, argv[0], 1);
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = object_resolve_prefix(&repo, argv[0], commit_hash);
+    if (result == MG_CONFLICT) {
+        puts("ambiguous object prefix");
+        return result;
+    }
+    if (result == MG_INVALID_ARG || result == MG_NOT_FOUND) {
+        puts("unknown commit");
+        return result;
+    }
+    if (result != MG_OK) {
+        puts("failed to resolve commit");
+        return result;
+    }
+
+    result = object_read(&repo, commit_hash, &object);
+    if (result != MG_OK) {
+        puts("unknown commit");
+        return result;
+    }
+    if (strcmp(object.type, "commit") != 0) {
+        object_free(&object);
+        puts("unknown commit");
+        return MG_NOT_FOUND;
+    }
+    object_free(&object);
+
+    result = checkout_commit(&repo, commit_hash, 1);
     if (result == MG_CONFLICT) {
         puts("checkout would overwrite local changes");
     } else if (result == MG_NOT_FOUND || result == MG_PARSE_ERROR) {
         puts("unknown commit");
     } else if (result != MG_OK) {
         puts("failed to checkout commit");
+    } else {
+        printf("checked out %.7s in detached HEAD state\n", commit_hash);
     }
 
     return result;

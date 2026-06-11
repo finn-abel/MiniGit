@@ -1,5 +1,7 @@
 #include "object.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +57,57 @@ static MGResult object_dir_path(const Repository *repo, const char *hash, char *
     }
 
     return MG_OK;
+}
+
+/*
+ * is_hex_prefix accepts the abbreviated object id syntax used by checkout.
+ */
+static int is_hex_prefix(const char *prefix) {
+    size_t len;
+
+    if (prefix == NULL) {
+        return 0;
+    }
+
+    len = strlen(prefix);
+    if (len < 7 || len >= MG_HASH_HEX_SIZE) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        char ch = prefix[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/*
+ * is_object_fanout_dir checks the two-character directory part of an object id.
+ */
+static int is_object_fanout_dir(const char *name) {
+    if (name == NULL || strlen(name) != 2) {
+        return 0;
+    }
+    return ((name[0] >= '0' && name[0] <= '9') || (name[0] >= 'a' && name[0] <= 'f')) &&
+           ((name[1] >= '0' && name[1] <= '9') || (name[1] >= 'a' && name[1] <= 'f'));
+}
+
+/*
+ * is_object_file_name checks the 62-character file part of an object id.
+ */
+static int is_object_file_name(const char *name) {
+    if (name == NULL || strlen(name) != MG_HASH_HEX_SIZE - 3) {
+        return 0;
+    }
+    for (size_t i = 0; name[i] != '\0'; i++) {
+        if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f'))) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /*
@@ -254,6 +307,93 @@ MGResult object_read(const Repository *repo, const char *hash, Object *out_objec
     result = parse_object(data, data_size, out_object);
     free(data);
     return result;
+}
+
+/*
+ * object_resolve_prefix scans the object database for a unique matching id.
+ */
+MGResult object_resolve_prefix(const Repository *repo, const char *prefix, char out_hash[MG_HASH_HEX_SIZE]) {
+    char objects_path[MG_MAX_PATH];
+    char normalized_prefix[MG_HASH_HEX_SIZE];
+    DIR *objects_dir;
+    struct dirent *fanout_entry;
+    size_t prefix_len;
+    int matches = 0;
+    MGResult result = MG_OK;
+
+    if (repo == NULL || out_hash == NULL || !is_hex_prefix(prefix)) {
+        return MG_INVALID_ARG;
+    }
+
+    prefix_len = strlen(prefix);
+    for (size_t i = 0; i < prefix_len; i++) {
+        normalized_prefix[i] = (char)tolower((unsigned char)prefix[i]);
+    }
+    normalized_prefix[prefix_len] = '\0';
+
+    if (fs_join_path(repo->gitdir_path, "objects", objects_path, sizeof(objects_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+
+    objects_dir = opendir(objects_path);
+    if (objects_dir == NULL) {
+        return MG_IO_ERROR;
+    }
+
+    while ((fanout_entry = readdir(objects_dir)) != NULL && result == MG_OK) {
+        char fanout_path[MG_MAX_PATH];
+        DIR *fanout_dir;
+        struct dirent *object_entry;
+
+        if (!is_object_fanout_dir(fanout_entry->d_name)) {
+            continue;
+        }
+        if (fs_join_path(objects_path, fanout_entry->d_name, fanout_path, sizeof(fanout_path)) != MG_OK) {
+            result = MG_INVALID_ARG;
+            break;
+        }
+
+        fanout_dir = opendir(fanout_path);
+        if (fanout_dir == NULL) {
+            result = MG_IO_ERROR;
+            break;
+        }
+
+        while ((object_entry = readdir(fanout_dir)) != NULL) {
+            char candidate[MG_HASH_HEX_SIZE];
+
+            if (!is_object_file_name(object_entry->d_name)) {
+                continue;
+            }
+            snprintf(candidate, sizeof(candidate), "%s%s", fanout_entry->d_name, object_entry->d_name);
+            if (strncmp(candidate, normalized_prefix, prefix_len) != 0) {
+                continue;
+            }
+
+            matches++;
+            if (matches > 1) {
+                result = MG_CONFLICT;
+                break;
+            }
+            strcpy(out_hash, candidate);
+        }
+
+        if (closedir(fanout_dir) != 0 && result == MG_OK) {
+            result = MG_IO_ERROR;
+        }
+    }
+
+    if (closedir(objects_dir) != 0 && result == MG_OK) {
+        result = MG_IO_ERROR;
+    }
+    if (result != MG_OK) {
+        return result;
+    }
+    if (matches == 0) {
+        return MG_NOT_FOUND;
+    }
+
+    return MG_OK;
 }
 
 /*

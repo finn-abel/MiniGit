@@ -32,6 +32,11 @@ MGResult object_write(
 MGResult object_read(const Repository *repo, const char *hash, Object *out_object);
 
 /*
+ * object_resolve_prefix expands a full hash or unique hex prefix to an object id.
+ */
+MGResult object_resolve_prefix(const Repository *repo, const char *prefix, char out_hash[MG_HASH_HEX_SIZE]);
+
+/*
  * object_free releases payload memory held by an Object.
  */
 void object_free(Object *object);
