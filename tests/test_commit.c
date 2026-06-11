@@ -124,6 +124,8 @@ static void test_commit_create_read_first_commit(void) {
 
     assert_true(strcmp(commit.tree_hash, tree_hash) == 0, "commit tree hash mismatch");
     assert_true(commit.parent_hash[0] == '\0', "first commit should not have parent");
+    assert_true(strcmp(commit.author_name, "MiniGit User") == 0, "default author name mismatch");
+    assert_true(strcmp(commit.author_email, "minigit@example.com") == 0, "default author email mismatch");
     assert_true(commit.timestamp > 0, "commit timestamp should be set");
     assert_true(strcmp(commit.message, "initial commit") == 0, "commit message mismatch");
 
@@ -154,6 +156,31 @@ static void test_commit_with_parent(void) {
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
+static void test_commit_author_from_environment(void) {
+    Repository repo;
+    Commit commit;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char tree_hash[MG_HASH_HEX_SIZE];
+    char commit_hash[MG_HASH_HEX_SIZE];
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    write_sample_tree(&repo, tree_hash);
+
+    assert_true(setenv("MINIGIT_AUTHOR_NAME", "Ada Lovelace", 1) == 0, "setenv author name failed");
+    assert_true(setenv("MINIGIT_AUTHOR_EMAIL", "ada@example.com", 1) == 0, "setenv author email failed");
+    assert_ok(commit_create(&repo, tree_hash, "", "authored commit", commit_hash), "commit_create with author failed");
+    assert_ok(commit_read(&repo, commit_hash, &commit), "commit_read with author failed");
+
+    assert_true(strcmp(commit.author_name, "Ada Lovelace") == 0, "env author name mismatch");
+    assert_true(strcmp(commit.author_email, "ada@example.com") == 0, "env author email mismatch");
+
+    commit_free(&commit);
+    unsetenv("MINIGIT_AUTHOR_NAME");
+    unsetenv("MINIGIT_AUTHOR_EMAIL");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
 static void test_invalid_commit_inputs(void) {
     Repository repo;
     char original_dir[MG_MAX_PATH];
@@ -167,6 +194,9 @@ static void test_invalid_commit_inputs(void) {
 
     assert_result(commit_create(&repo, tree_hash, "", "", commit_hash), MG_INVALID_ARG, "empty message should fail");
     assert_result(commit_create(&repo, tree_hash, "", "bad\nmessage", commit_hash), MG_INVALID_ARG, "newline message should fail");
+    assert_true(setenv("MINIGIT_AUTHOR_EMAIL", "bad<email@example.com", 1) == 0, "setenv invalid email failed");
+    assert_result(commit_create(&repo, tree_hash, "", "message", commit_hash), MG_INVALID_ARG, "invalid author email should fail");
+    unsetenv("MINIGIT_AUTHOR_EMAIL");
     assert_result(commit_create(&repo, missing_tree, "", "message", commit_hash), MG_NOT_FOUND, "missing tree should fail");
 
     cleanup_temp_repo(original_dir, temp_dir);
@@ -175,6 +205,7 @@ static void test_invalid_commit_inputs(void) {
 int main(void) {
     test_commit_create_read_first_commit();
     test_commit_with_parent();
+    test_commit_author_from_environment();
     test_invalid_commit_inputs();
     puts("test_commit passed");
     return 0;

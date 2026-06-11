@@ -12,6 +12,8 @@
 typedef struct {
     char tree_hash[MG_HASH_HEX_SIZE];
     char parent_hash[MG_HASH_HEX_SIZE];
+    char *author_name;
+    char *author_email;
     time_t timestamp;
     char *message;
 } Commit;

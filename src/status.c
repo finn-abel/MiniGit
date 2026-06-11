@@ -9,6 +9,7 @@
 #include "commit.h"
 #include "fs.h"
 #include "hash.h"
+#include "ignore.h"
 #include "index.h"
 #include "tree.h"
 
@@ -44,6 +45,7 @@ typedef struct {
  */
 typedef struct {
     const Index *index;
+    const IgnoreRules *ignore_rules;
     ChangeList *untracked;
 } UntrackedContext;
 
@@ -308,6 +310,9 @@ static MGResult collect_untracked(const char *relative_path, void *ctx) {
     if (index_find_const(context->index, relative_path) != NULL) {
         return MG_OK;
     }
+    if (ignore_rules_match(context->ignore_rules, relative_path)) {
+        return MG_OK;
+    }
     return change_list_add(context->untracked, CHANGE_UNTRACKED, relative_path);
 }
 
@@ -345,6 +350,7 @@ MGResult status_print(const Repository *repo) {
     ChangeList staged;
     ChangeList unstaged;
     ChangeList untracked;
+    IgnoreRules ignore_rules;
     UntrackedContext untracked_context;
     MGResult result;
 
@@ -366,21 +372,27 @@ MGResult status_print(const Repository *repo) {
         goto done_with_index;
     }
 
-    result = compare_head_to_index(&head_tree, &index, &staged);
+    result = ignore_rules_load(repo, &ignore_rules);
     if (result != MG_OK) {
         goto done_with_tree;
+    }
+
+    result = compare_head_to_index(&head_tree, &index, &staged);
+    if (result != MG_OK) {
+        goto done_with_ignore_rules;
     }
 
     result = compare_index_to_worktree(repo, &index, &unstaged);
     if (result != MG_OK) {
-        goto done_with_tree;
+        goto done_with_ignore_rules;
     }
 
     untracked_context.index = &index;
+    untracked_context.ignore_rules = &ignore_rules;
     untracked_context.untracked = &untracked;
     result = fs_walk(repo->worktree_path, collect_untracked, &untracked_context);
     if (result != MG_OK) {
-        goto done_with_tree;
+        goto done_with_ignore_rules;
     }
 
     change_list_sort(&staged);
@@ -390,6 +402,8 @@ MGResult status_print(const Repository *repo) {
     print_labeled_section("Changes not staged for commit", &unstaged);
     print_untracked_section(&untracked);
 
+done_with_ignore_rules:
+    ignore_rules_free(&ignore_rules);
 done_with_tree:
     tree_free(&head_tree);
 done_with_index:

@@ -243,6 +243,26 @@ static void test_status_sorted_untracked_files(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_status_respects_minigitignore(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    const unsigned char ignore[] = "ignored.txt\nlogs/\n";
+    const unsigned char contents[] = "x\n";
+
+    make_temp_dir(original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file(".minigitignore", ignore, sizeof(ignore) - 1), MG_OK, "write ignore failed");
+    assert_result(fs_write_file("ignored.txt", contents, sizeof(contents) - 1), MG_OK, "write ignored failed");
+    assert_result(mkdir("logs", 0700) == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "mkdir logs failed");
+    assert_result(fs_write_file("logs/run.log", contents, sizeof(contents) - 1), MG_OK, "write log failed");
+    assert_result(fs_write_file("keep.txt", contents, sizeof(contents) - 1), MG_OK, "write keep failed");
+
+    assert_status_equals("Untracked files:\n  .minigitignore\n  keep.txt\n");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_status_lifecycle();
     test_rm_stages_deletion();
@@ -250,6 +270,7 @@ int main(void) {
     test_status_deleted_working_file();
     test_status_staged_modification();
     test_status_sorted_untracked_files();
+    test_status_respects_minigitignore();
     puts("test_status passed");
     return 0;
 }

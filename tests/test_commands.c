@@ -12,6 +12,7 @@
 #include "common.h"
 #include "fs.h"
 #include "hash.h"
+#include "index.h"
 #include "repository.h"
 
 static void assert_result(MGResult actual, MGResult expected, const char *message) {
@@ -239,12 +240,42 @@ static void test_branch_command_delete(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_add_respects_minigitignore(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"."};
+    const unsigned char ignore[] = "ignored.txt\nlogs/\n";
+    const unsigned char contents[] = "x\n";
+
+    make_temp_dir("commands_ignore", original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init should create repo for ignore test");
+    assert_result(fs_write_file(".minigitignore", ignore, sizeof(ignore) - 1), MG_OK, "write ignore failed");
+    assert_result(fs_write_file("ignored.txt", contents, sizeof(contents) - 1), MG_OK, "write ignored failed");
+    assert_result(mkdir("logs", 0700) == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "mkdir logs failed");
+    assert_result(fs_write_file("logs/run.log", contents, sizeof(contents) - 1), MG_OK, "write log failed");
+    assert_result(fs_write_file("keep.txt", contents, sizeof(contents) - 1), MG_OK, "write keep failed");
+
+    assert_result(mg_command_add(1, add_args), MG_OK, "add dot should skip ignored files");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(index_load(&repo, &index), MG_OK, "index_load failed");
+    assert_true(index_find_const(&index, "ignored.txt") == NULL, "ignored file should not be staged");
+    assert_true(index_find_const(&index, "logs/run.log") == NULL, "ignored dir file should not be staged");
+    assert_true(index_find_const(&index, "keep.txt") != NULL, "non-ignored file should be staged");
+    index_free(&index);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_repo_required_commands();
     test_command_validation_before_repo_open();
     test_commit_and_log_commands();
     test_branch_command_create();
     test_branch_command_delete();
+    test_add_respects_minigitignore();
     puts("All commands tests passed.");
     return 0;
 }

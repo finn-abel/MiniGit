@@ -10,24 +10,113 @@
 #include "hash.h"
 #include "object.h"
 
+#define MG_DEFAULT_AUTHOR_NAME "MiniGit User"
+#define MG_DEFAULT_AUTHOR_EMAIL "minigit@example.com"
+
 /*
- * copy_message owns the commit message string after parsing.
- * Commit messages are one line in v1, so empty parsed messages are rejected.
+ * copy_text owns a parsed commit string field.
  */
-static MGResult copy_message(Commit *commit, const char *message) {
+static MGResult copy_text(char **out, const char *value) {
     size_t len;
 
-    if (commit == NULL || message == NULL || message[0] == '\0') {
+    if (out == NULL || value == NULL || value[0] == '\0') {
         return MG_PARSE_ERROR;
     }
 
-    len = strlen(message) + 1;
-    commit->message = malloc(len);
-    if (commit->message == NULL) {
+    len = strlen(value) + 1;
+    *out = malloc(len);
+    if (*out == NULL) {
         return MG_ERROR;
     }
-    memcpy(commit->message, message, len);
+    memcpy(*out, value, len);
     return MG_OK;
+}
+
+static MGResult copy_message(Commit *commit, const char *message) {
+    if (commit == NULL) {
+        return MG_PARSE_ERROR;
+    }
+    return copy_text(&commit->message, message);
+}
+
+static MGResult copy_author(Commit *commit, const char *name, const char *email) {
+    MGResult result;
+
+    if (commit == NULL) {
+        return MG_PARSE_ERROR;
+    }
+
+    result = copy_text(&commit->author_name, name);
+    if (result != MG_OK) {
+        return result;
+    }
+    result = copy_text(&commit->author_email, email);
+    if (result != MG_OK) {
+        free(commit->author_name);
+        commit->author_name = NULL;
+        return result;
+    }
+    return MG_OK;
+}
+
+static const char *author_env_or_default(const char *name, const char *fallback) {
+    const char *value = getenv(name);
+    if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+    return value;
+}
+
+static int author_value_is_valid(const char *value) {
+    return value != NULL && value[0] != '\0' && strchr(value, '\n') == NULL && strchr(value, '\r') == NULL;
+}
+
+static MGResult parse_author_line(Commit *commit, const char *line) {
+    const char *name_start;
+    const char *email_start;
+    const char *email_end;
+    size_t name_len;
+    size_t email_len;
+    char *name;
+    char *email;
+    MGResult result;
+
+    if (commit == NULL || line == NULL || strncmp(line, "author ", 7) != 0) {
+        return MG_PARSE_ERROR;
+    }
+
+    name_start = line + 7;
+    email_start = strchr(name_start, '<');
+    email_end = email_start == NULL ? NULL : strchr(email_start + 1, '>');
+    if (email_start == NULL || email_end == NULL || email_end[1] != '\0' || email_start == name_start) {
+        return MG_PARSE_ERROR;
+    }
+    if (email_start[-1] != ' ') {
+        return MG_PARSE_ERROR;
+    }
+
+    name_len = (size_t)(email_start - name_start - 1);
+    email_len = (size_t)(email_end - email_start - 1);
+    if (name_len == 0 || email_len == 0) {
+        return MG_PARSE_ERROR;
+    }
+
+    name = malloc(name_len + 1);
+    email = malloc(email_len + 1);
+    if (name == NULL || email == NULL) {
+        free(name);
+        free(email);
+        return MG_ERROR;
+    }
+    memcpy(name, name_start, name_len);
+    name[name_len] = '\0';
+    memcpy(email, email_start + 1, email_len);
+    email[email_len] = '\0';
+
+    result = copy_author(commit, name, email);
+    free(name);
+    free(email);
+    return result;
 }
 
 /*
@@ -103,7 +192,7 @@ static char *next_line(char **cursor) {
 
 /*
  * parse_commit_payload validates the commit wire format line by line.
- * Valid order is tree, optional parent, timestamp, message, then EOF.
+ * Valid order is tree, optional parent, optional author, timestamp, message, then EOF.
  */
 static MGResult parse_commit_payload(const unsigned char *payload, size_t size, Commit *commit) {
     char *buffer;
@@ -146,6 +235,15 @@ static MGResult parse_commit_payload(const unsigned char *payload, size_t size, 
         commit->parent_hash[0] = '\0';
     }
 
+    if (line != NULL && strncmp(line, "author ", 7) == 0) {
+        if (parse_author_line(commit, line) != MG_OK) {
+            goto done;
+        }
+        line = next_line(&cursor);
+    } else if (copy_author(commit, MG_DEFAULT_AUTHOR_NAME, MG_DEFAULT_AUTHOR_EMAIL) != MG_OK) {
+        goto done;
+    }
+
     /* Timestamp and message are required for every commit. */
     if (line == NULL || strncmp(line, "timestamp ", 10) != 0 ||
         parse_timestamp(line + 10, &commit->timestamp) != MG_OK) {
@@ -182,6 +280,8 @@ MGResult commit_create(
     char out_hash[MG_HASH_HEX_SIZE]
 ) {
     char timestamp_text[32];
+    const char *author_name;
+    const char *author_email;
     time_t now;
     int timestamp_len;
     int payload_size;
@@ -197,6 +297,12 @@ MGResult commit_create(
         return MG_INVALID_ARG;
     }
     if (parent_hash != NULL && parent_hash[0] != '\0' && !hash_is_valid_hex(parent_hash)) {
+        return MG_INVALID_ARG;
+    }
+    author_name = author_env_or_default("MINIGIT_AUTHOR_NAME", MG_DEFAULT_AUTHOR_NAME);
+    author_email = author_env_or_default("MINIGIT_AUTHOR_EMAIL", MG_DEFAULT_AUTHOR_EMAIL);
+    if (!author_value_is_valid(author_name) || !author_value_is_valid(author_email) ||
+        strchr(author_email, '<') != NULL || strchr(author_email, '>') != NULL) {
         return MG_INVALID_ARG;
     }
 
@@ -219,9 +325,11 @@ MGResult commit_create(
         payload_size = snprintf(
             NULL,
             0,
-            "tree %s\nparent %s\ntimestamp %s\nmessage %s\n",
+            "tree %s\nparent %s\nauthor %s <%s>\ntimestamp %s\nmessage %s\n",
             tree_hash,
             parent_hash,
+            author_name,
+            author_email,
             timestamp_text,
             message
         );
@@ -229,8 +337,10 @@ MGResult commit_create(
         payload_size = snprintf(
             NULL,
             0,
-            "tree %s\ntimestamp %s\nmessage %s\n",
+            "tree %s\nauthor %s <%s>\ntimestamp %s\nmessage %s\n",
             tree_hash,
+            author_name,
+            author_email,
             timestamp_text,
             message
         );
@@ -249,9 +359,11 @@ MGResult commit_create(
         snprintf(
             (char *)payload,
             (size_t)payload_size + 1,
-            "tree %s\nparent %s\ntimestamp %s\nmessage %s\n",
+            "tree %s\nparent %s\nauthor %s <%s>\ntimestamp %s\nmessage %s\n",
             tree_hash,
             parent_hash,
+            author_name,
+            author_email,
             timestamp_text,
             message
         );
@@ -259,8 +371,10 @@ MGResult commit_create(
         snprintf(
             (char *)payload,
             (size_t)payload_size + 1,
-            "tree %s\ntimestamp %s\nmessage %s\n",
+            "tree %s\nauthor %s <%s>\ntimestamp %s\nmessage %s\n",
             tree_hash,
+            author_name,
+            author_email,
             timestamp_text,
             message
         );
@@ -320,5 +434,7 @@ void commit_free(Commit *commit) {
     }
 
     free(commit->message);
+    free(commit->author_name);
+    free(commit->author_email);
     memset(commit, 0, sizeof(*commit));
 }

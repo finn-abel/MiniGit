@@ -11,6 +11,7 @@
 #include "diff.h"
 #include "fs.h"
 #include "hash.h"
+#include "ignore.h"
 #include "index.h"
 #include "object.h"
 #include "repository.h"
@@ -24,6 +25,7 @@
 typedef struct {
     const Repository *repo;
     Index *index;
+    const IgnoreRules *ignore_rules;
     const char *base_relative;
 } AddContext;
 
@@ -97,13 +99,16 @@ static MGResult stage_walked_file(const char *walk_relative_path, void *ctx) {
         return MG_INVALID_ARG;
     }
 
+    if (ignore_rules_match(add_ctx->ignore_rules, relative_path)) {
+        return MG_OK;
+    }
     return stage_file(add_ctx->repo, add_ctx->index, relative_path);
 }
 
 /*
  * stage_path stages either one regular file or every regular file under a directory.
  */
-static MGResult stage_path(const Repository *repo, Index *index, const char *input_path) {
+static MGResult stage_path(const Repository *repo, Index *index, const IgnoreRules *ignore_rules, const char *input_path) {
     char relative_path[MG_MAX_PATH];
     char full_path[MG_MAX_PATH];
     struct stat st;
@@ -122,6 +127,9 @@ static MGResult stage_path(const Repository *repo, Index *index, const char *inp
     if (lstat(full_path, &st) != 0) {
         return MG_NOT_FOUND;
     }
+    if (relative_path[0] != '\0' && ignore_rules_match(ignore_rules, relative_path)) {
+        return MG_OK;
+    }
     if (S_ISREG(st.st_mode)) {
         if (relative_path[0] == '\0') {
             return MG_INVALID_ARG;
@@ -129,7 +137,7 @@ static MGResult stage_path(const Repository *repo, Index *index, const char *inp
         return stage_file(repo, index, relative_path);
     }
     if (S_ISDIR(st.st_mode)) {
-        AddContext ctx = {repo, index, relative_path};
+        AddContext ctx = {repo, index, ignore_rules, relative_path};
         return fs_walk(full_path, stage_walked_file, &ctx);
     }
 
@@ -282,6 +290,7 @@ static MGResult print_commit_log_entry(const char *hash, const Commit *commit) {
     }
 
     printf("commit %s\n", hash);
+    printf("Author: %s <%s>\n", commit->author_name, commit->author_email);
     printf("Date: %s\n\n", date);
     printf("    %s\n\n", commit->message);
     return MG_OK;
@@ -329,6 +338,7 @@ MGResult mg_command_init(int argc, char **argv) {
 MGResult mg_command_add(int argc, char **argv) {
     Repository repo;
     Index index;
+    IgnoreRules ignore_rules;
     MGResult result;
 
     if (argc < 1) {
@@ -347,9 +357,17 @@ MGResult mg_command_add(int argc, char **argv) {
         return result;
     }
 
+    result = ignore_rules_load(&repo, &ignore_rules);
+    if (result != MG_OK) {
+        index_free(&index);
+        puts("failed to load ignore rules");
+        return result;
+    }
+
     for (int i = 0; i < argc; i++) {
-        result = stage_path(&repo, &index, argv[i]);
+        result = stage_path(&repo, &index, &ignore_rules, argv[i]);
         if (result != MG_OK) {
+            ignore_rules_free(&ignore_rules);
             index_free(&index);
             puts("failed to add path");
             return result;
@@ -357,6 +375,7 @@ MGResult mg_command_add(int argc, char **argv) {
     }
 
     result = index_save(&repo, &index);
+    ignore_rules_free(&ignore_rules);
     index_free(&index);
     if (result != MG_OK) {
         puts("failed to save index");
