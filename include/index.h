@@ -57,6 +57,11 @@ MGResult index_remove(Index *index, const char *path);
 IndexEntry *index_find(Index *index, const char *path);
 
 /*
+ * index_find_const returns the entry for path or NULL.
+ */
+const IndexEntry *index_find_const(const Index *index, const char *path);
+
+/*
  * index_free releases memory owned by index.
  */
 void index_free(Index *index);

@@ -385,6 +385,20 @@ IndexEntry *index_find(Index *index, const char *path) {
     return NULL;
 }
 
+const IndexEntry *index_find_const(const Index *index, const char *path) {
+    if (index == NULL || path == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < index->count; i++) {
+        if (strcmp(index->entries[i].path, path) == 0) {
+            return &index->entries[i];
+        }
+    }
+
+    return NULL;
+}
+
 /*
  * index_free leaves the struct reusable after releasing its allocation.
  */

@@ -115,6 +115,7 @@ static void test_save_load_update_remove(void) {
 
     entry = index_find(&loaded, "z.txt");
     assert_true(entry != NULL, "updated entry should exist");
+    assert_true(index_find_const(&loaded, "z.txt") == entry, "const find should return the same entry");
     assert_true(strcmp(entry->hash, hash_c) == 0, "updated hash mismatch");
     assert_true(entry->size == 3, "updated size mismatch");
     assert_true((long)entry->mtime == 30, "updated mtime mismatch");

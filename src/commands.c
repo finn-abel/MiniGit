@@ -12,6 +12,7 @@
 #include "index.h"
 #include "object.h"
 #include "repository.h"
+#include "status.h"
 #include "tree.h"
 
 /*
@@ -130,6 +131,45 @@ static MGResult stage_path(const Repository *repo, Index *index, const char *inp
     }
 
     return MG_INVALID_ARG;
+}
+
+/*
+ * remove_tracked_path removes one tracked file from the index and working tree.
+ */
+static MGResult remove_tracked_path(const Repository *repo, Index *index, const char *input_path) {
+    char relative_path[MG_MAX_PATH];
+    char full_path[MG_MAX_PATH];
+    const IndexEntry *entry;
+
+    if (fs_repo_relative_path(repo->worktree_path, input_path, relative_path, sizeof(relative_path)) != MG_OK ||
+        relative_path[0] == '\0') {
+        return MG_INVALID_ARG;
+    }
+
+    entry = index_find_const(index, relative_path);
+    if (entry == NULL) {
+        printf("path not tracked: %s\n", relative_path);
+        return MG_NOT_FOUND;
+    }
+
+    if (fs_join_path(repo->worktree_path, relative_path, full_path, sizeof(full_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (fs_exists(full_path)) {
+        if (!fs_is_file(full_path)) {
+            return MG_INVALID_ARG;
+        }
+        if (fs_remove_file(full_path) != MG_OK) {
+            return MG_IO_ERROR;
+        }
+    }
+
+    if (index_remove(index, relative_path) != MG_OK) {
+        return MG_ERROR;
+    }
+
+    printf("removed %s\n", relative_path);
+    return MG_OK;
 }
 
 /*
@@ -282,12 +322,37 @@ MGResult mg_command_add(int argc, char **argv) {
  */
 MGResult mg_command_rm(int argc, char **argv) {
     Repository repo;
+    Index index;
     MGResult result = require_repo(&repo);
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("rm not implemented yet");
+    if (argc < 1) {
+        puts("usage: minigit rm <path>...");
+        return MG_INVALID_ARG;
+    }
+
+    result = index_load(&repo, &index);
+    if (result != MG_OK) {
+        puts("failed to load index");
+        return result;
+    }
+
+    for (int i = 0; i < argc; i++) {
+        result = remove_tracked_path(&repo, &index, argv[i]);
+        if (result != MG_OK) {
+            index_free(&index);
+            return result;
+        }
+    }
+
+    result = index_save(&repo, &index);
+    index_free(&index);
+    if (result != MG_OK) {
+        puts("failed to save index");
+        return result;
+    }
+
     return MG_OK;
 }
 
@@ -300,9 +365,17 @@ MGResult mg_command_status(int argc, char **argv) {
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("status not implemented yet");
-    return MG_OK;
+    if (argc != 0) {
+        ignore_args(argc, argv);
+        puts("usage: minigit status");
+        return MG_INVALID_ARG;
+    }
+
+    result = status_print(&repo);
+    if (result != MG_OK) {
+        puts("failed to get status");
+    }
+    return result;
 }
 
 /*
