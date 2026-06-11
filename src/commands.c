@@ -6,10 +6,13 @@
 #include <sys/stat.h>
 
 #include "commands.h"
+#include "commit.h"
 #include "fs.h"
+#include "hash.h"
 #include "index.h"
 #include "object.h"
 #include "repository.h"
+#include "tree.h"
 
 /*
  * AddContext carries state needed while recursively staging a directory.
@@ -130,6 +133,84 @@ static MGResult stage_path(const Repository *repo, Index *index, const char *inp
 }
 
 /*
+ * parse_commit_message validates `minigit commit -m <message>`.
+ */
+static MGResult parse_commit_message(int argc, char **argv, const char **out_message) {
+    if (out_message == NULL) {
+        return MG_INVALID_ARG;
+    }
+    if (argc != 2 || argv == NULL || strcmp(argv[0], "-m") != 0 || argv[1] == NULL || argv[1][0] == '\0') {
+        puts("usage: minigit commit -m <message>");
+        return MG_INVALID_ARG;
+    }
+
+    *out_message = argv[1];
+    return MG_OK;
+}
+
+/*
+ * tree_matches_parent reports whether the staged tree equals the parent tree.
+ */
+static MGResult tree_matches_parent(const Repository *repo, const char *parent_hash, const char *tree_hash, int *out_matches) {
+    Commit parent_commit;
+    MGResult result;
+
+    if (repo == NULL || parent_hash == NULL || tree_hash == NULL || out_matches == NULL) {
+        return MG_INVALID_ARG;
+    }
+
+    *out_matches = 0;
+    if (parent_hash[0] == '\0') {
+        return MG_OK;
+    }
+
+    result = commit_read(repo, parent_hash, &parent_commit);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    *out_matches = strcmp(parent_commit.tree_hash, tree_hash) == 0;
+    commit_free(&parent_commit);
+    return MG_OK;
+}
+
+/*
+ * print_commit_summary prints the short hash line after creating a commit.
+ */
+static MGResult print_commit_summary(const Repository *repo, const char *commit_hash, const char *message) {
+    char head_name[MG_MAX_BRANCH];
+    MGResult result = repo_head_display_name(repo, head_name, sizeof(head_name));
+
+    if (result != MG_OK) {
+        return result;
+    }
+    printf("[%s %.7s] %s\n", head_name, commit_hash, message);
+    return MG_OK;
+}
+
+/*
+ * print_commit_log_entry prints one commit in log format.
+ */
+static MGResult print_commit_log_entry(const char *hash, const Commit *commit) {
+    char date[128];
+    MGResult result;
+
+    if (hash == NULL || commit == NULL) {
+        return MG_INVALID_ARG;
+    }
+
+    result = commit_format_timestamp(commit->timestamp, date, sizeof(date));
+    if (result != MG_OK) {
+        return result;
+    }
+
+    printf("commit %s\n", hash);
+    printf("Date: %s\n\n", date);
+    printf("    %s\n\n", commit->message);
+    return MG_OK;
+}
+
+/*
  * mg_command_init handles `minigit init`.
  */
 MGResult mg_command_init(int argc, char **argv) {
@@ -229,13 +310,72 @@ MGResult mg_command_status(int argc, char **argv) {
  */
 MGResult mg_command_commit(int argc, char **argv) {
     Repository repo;
+    Index index;
+    Tree tree;
+    const char *message;
+    char tree_hash[MG_HASH_HEX_SIZE];
+    char parent_hash[MG_HASH_HEX_SIZE];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    int unchanged;
     MGResult result = require_repo(&repo);
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("commit not implemented yet");
-    return MG_OK;
+
+    result = parse_commit_message(argc, argv, &message);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = index_load(&repo, &index);
+    if (result != MG_OK) {
+        puts("failed to load index");
+        return result;
+    }
+
+    result = tree_from_index(&index, &tree);
+    index_free(&index);
+    if (result != MG_OK) {
+        puts("failed to build tree");
+        return result;
+    }
+
+    result = tree_write(&repo, &tree, tree_hash);
+    tree_free(&tree);
+    if (result != MG_OK) {
+        puts("failed to write tree");
+        return result;
+    }
+
+    result = repo_current_commit(&repo, parent_hash, sizeof(parent_hash));
+    if (result != MG_OK) {
+        puts("failed to resolve current commit");
+        return result;
+    }
+
+    result = tree_matches_parent(&repo, parent_hash, tree_hash, &unchanged);
+    if (result != MG_OK) {
+        puts("failed to read parent commit");
+        return result;
+    }
+    if (unchanged) {
+        puts("nothing to commit");
+        return MG_OK;
+    }
+
+    result = commit_create(&repo, tree_hash, parent_hash, message, commit_hash);
+    if (result != MG_OK) {
+        puts("failed to create commit");
+        return result;
+    }
+
+    result = repo_update_current_ref(&repo, commit_hash);
+    if (result != MG_OK) {
+        puts("failed to update HEAD");
+        return result;
+    }
+
+    return print_commit_summary(&repo, commit_hash, message);
 }
 
 /*
@@ -243,12 +383,49 @@ MGResult mg_command_commit(int argc, char **argv) {
  */
 MGResult mg_command_log(int argc, char **argv) {
     Repository repo;
+    char current_hash[MG_HASH_HEX_SIZE];
     MGResult result = require_repo(&repo);
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("log not implemented yet");
+
+    if (argc != 0) {
+        ignore_args(argc, argv);
+        puts("usage: minigit log");
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_current_commit(&repo, current_hash, sizeof(current_hash));
+    if (result != MG_OK) {
+        puts("failed to resolve current commit");
+        return result;
+    }
+    if (current_hash[0] == '\0') {
+        puts("no commits yet");
+        return MG_OK;
+    }
+
+    while (current_hash[0] != '\0') {
+        Commit commit;
+        char parent_hash[MG_HASH_HEX_SIZE];
+
+        result = commit_read(&repo, current_hash, &commit);
+        if (result != MG_OK) {
+            puts("failed to read commit");
+            return result;
+        }
+
+        result = print_commit_log_entry(current_hash, &commit);
+        if (result != MG_OK) {
+            commit_free(&commit);
+            return result;
+        }
+
+        strcpy(parent_hash, commit.parent_hash);
+        commit_free(&commit);
+        strcpy(current_hash, parent_hash);
+    }
+
     return MG_OK;
 }
 

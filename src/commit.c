@@ -298,6 +298,22 @@ MGResult commit_read(const Repository *repo, const char *hash, Commit *commit) {
     return result;
 }
 
+MGResult commit_format_timestamp(time_t timestamp, char *out, size_t out_size) {
+    struct tm time_info;
+
+    if (out == NULL || out_size == 0 || timestamp < 0) {
+        return MG_INVALID_ARG;
+    }
+    if (localtime_r(&timestamp, &time_info) == NULL) {
+        return MG_ERROR;
+    }
+    if (strftime(out, out_size, "%c", &time_info) == 0) {
+        return MG_INVALID_ARG;
+    }
+
+    return MG_OK;
+}
+
 void commit_free(Commit *commit) {
     if (commit == NULL) {
         return;

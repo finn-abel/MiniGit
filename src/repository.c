@@ -37,6 +37,36 @@ static void trim_trailing_newline(char *value) {
 }
 
 /*
+ * copy_trimmed_text copies bytes to text, trims newlines, and checks capacity.
+ */
+static MGResult copy_trimmed_text(const unsigned char *data, size_t size, char *out, size_t out_size) {
+    char *buffer;
+    size_t trimmed_size;
+
+    if (data == NULL || out == NULL || out_size == 0) {
+        return MG_INVALID_ARG;
+    }
+
+    buffer = malloc(size + 1);
+    if (buffer == NULL) {
+        return MG_ERROR;
+    }
+    memcpy(buffer, data, size);
+    buffer[size] = '\0';
+    trim_trailing_newline(buffer);
+
+    trimmed_size = strlen(buffer);
+    if (trimmed_size >= out_size) {
+        free(buffer);
+        return MG_INVALID_ARG;
+    }
+
+    memcpy(out, buffer, trimmed_size + 1);
+    free(buffer);
+    return MG_OK;
+}
+
+/*
  * repo_path joins a path inside .minigit into out.
  */
 static MGResult repo_path(const Repository *repo, const char *relative, char *out, size_t out_size) {
@@ -110,6 +140,7 @@ MGResult repo_read_head(const Repository *repo, char *out, size_t out_size) {
     char head_path[MG_MAX_PATH];
     unsigned char *data;
     size_t size;
+    MGResult result;
 
     if (out == NULL || out_size == 0) {
         return MG_INVALID_ARG;
@@ -120,16 +151,9 @@ MGResult repo_read_head(const Repository *repo, char *out, size_t out_size) {
     if (fs_read_file(head_path, &data, &size) != MG_OK) {
         return MG_IO_ERROR;
     }
-    if (size >= out_size) {
-        free(data);
-        return MG_INVALID_ARG;
-    }
-
-    memcpy(out, data, size);
-    out[size] = '\0';
+    result = copy_trimmed_text(data, size, out, out_size);
     free(data);
-    trim_trailing_newline(out);
-    return MG_OK;
+    return result;
 }
 
 /*
@@ -194,6 +218,7 @@ MGResult repo_current_commit(const Repository *repo, char *out, size_t out_size)
     char ref_file_path[MG_MAX_PATH];
     unsigned char *data;
     size_t size;
+    MGResult result;
 
     if (out == NULL || out_size == 0) {
         return MG_INVALID_ARG;
@@ -216,16 +241,9 @@ MGResult repo_current_commit(const Repository *repo, char *out, size_t out_size)
     if (fs_read_file(ref_file_path, &data, &size) != MG_OK) {
         return MG_IO_ERROR;
     }
-    if (size >= out_size) {
-        free(data);
-        return MG_INVALID_ARG;
-    }
-
-    memcpy(out, data, size);
-    out[size] = '\0';
+    result = copy_trimmed_text(data, size, out, out_size);
     free(data);
-    trim_trailing_newline(out);
-    return MG_OK;
+    return result;
 }
 
 /*
@@ -257,4 +275,29 @@ MGResult repo_update_current_ref(const Repository *repo, const char *commit_hash
         return MG_INVALID_ARG;
     }
     return fs_write_file(target_path, (const unsigned char *)contents, strlen(contents));
+}
+
+/*
+ * repo_head_display_name chooses the label used in commit output.
+ */
+MGResult repo_head_display_name(const Repository *repo, char *out, size_t out_size) {
+    MGResult result;
+
+    if (out == NULL || out_size == 0) {
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_current_branch(repo, out, out_size);
+    if (result == MG_OK) {
+        return MG_OK;
+    }
+    if (result == MG_NOT_FOUND) {
+        if (strlen("detached") >= out_size) {
+            return MG_INVALID_ARG;
+        }
+        strcpy(out, "detached");
+        return MG_OK;
+    }
+
+    return result;
 }

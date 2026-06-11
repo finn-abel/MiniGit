@@ -33,6 +33,11 @@ MGResult commit_create(
 MGResult commit_read(const Repository *repo, const char *hash, Commit *commit);
 
 /*
+ * commit_format_timestamp writes a human-readable timestamp.
+ */
+MGResult commit_format_timestamp(time_t timestamp, char *out, size_t out_size);
+
+/*
  * commit_free releases memory owned by commit.
  */
 void commit_free(Commit *commit);

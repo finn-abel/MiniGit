@@ -53,4 +53,9 @@ MGResult repo_current_commit(const Repository *repo, char *out, size_t out_size)
  */
 MGResult repo_update_current_ref(const Repository *repo, const char *commit_hash);
 
+/*
+ * repo_head_display_name writes the current branch name or "detached".
+ */
+MGResult repo_head_display_name(const Repository *repo, char *out, size_t out_size);
+
 #endif
