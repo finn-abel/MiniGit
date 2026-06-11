@@ -236,3 +236,59 @@ MGResult checkout_commit(const Repository *repo, const char commit_hash[MG_HASH_
 
     return MG_OK;
 }
+
+/*
+ * checkout_restore_path restores one HEAD tree entry without changing HEAD.
+ */
+MGResult checkout_restore_path(const Repository *repo, const char *relative_path) {
+    char commit_hash[MG_HASH_HEX_SIZE];
+    Commit commit;
+    Tree head_tree;
+    Index index;
+    const TreeEntry *entry;
+    MGResult result;
+
+    if (repo == NULL || relative_path == NULL || relative_path[0] == '\0') {
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_current_commit(repo, commit_hash, sizeof(commit_hash));
+    if (result != MG_OK) {
+        return result;
+    }
+    if (commit_hash[0] == '\0') {
+        return MG_REPO_ERROR;
+    }
+
+    result = commit_read(repo, commit_hash, &commit);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = tree_read(repo, commit.tree_hash, &head_tree);
+    commit_free(&commit);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    entry = tree_find_entry(&head_tree, relative_path);
+    if (entry == NULL) {
+        tree_free(&head_tree);
+        return MG_NOT_FOUND;
+    }
+
+    result = index_load(repo, &index);
+    if (result != MG_OK) {
+        tree_free(&head_tree);
+        return result;
+    }
+
+    result = restore_blob(repo, entry, &index);
+    if (result == MG_OK) {
+        result = index_save(repo, &index);
+    }
+
+    index_free(&index);
+    tree_free(&head_tree);
+    return result;
+}

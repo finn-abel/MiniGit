@@ -50,6 +50,8 @@ int main(int argc, char **argv) {
         result = mg_command_switch(argc - 2, argv + 2);
     } else if (strcmp(command, "checkout") == 0) {
         result = mg_command_checkout(argc - 2, argv + 2);
+    } else if (strcmp(command, "restore") == 0) {
+        result = mg_command_restore(argc - 2, argv + 2);
     } else {
         fprintf(stderr, "unknown command: %s\n", command);
         print_usage();

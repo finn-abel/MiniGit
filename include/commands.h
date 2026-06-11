@@ -53,4 +53,9 @@ MGResult mg_command_switch(int argc, char **argv);
  */
 MGResult mg_command_checkout(int argc, char **argv);
 
+/*
+ * mg_command_restore handles `minigit restore <path>`.
+ */
+MGResult mg_command_restore(int argc, char **argv);
+
 #endif

@@ -8,9 +8,12 @@
 #include <unistd.h>
 
 #include "commands.h"
+#include "commit.h"
 #include "common.h"
 #include "fs.h"
+#include "index.h"
 #include "repository.h"
+#include "tree.h"
 
 static void assert_result(MGResult actual, MGResult expected, const char *message) {
     if (actual != expected) {
@@ -189,10 +192,72 @@ static void test_switch_restores_branch_and_updates_head(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_restore_path_from_head(void) {
+    Repository repo;
+    Commit commit;
+    Tree tree;
+    Index index;
+    const TreeEntry *tree_entry;
+    const IndexEntry *index_entry;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    char *add_args[] = {"file.txt"};
+    char *restore_args[] = {"file.txt"};
+    char *file_contents;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_file("one\n", "one", commit_hash);
+
+    assert_result(fs_write_file("file.txt", (const unsigned char *)"staged\n", strlen("staged\n")), MG_OK, "write staged failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "stage modified file failed");
+    assert_result(fs_write_file("file.txt", (const unsigned char *)"dirty\n", strlen("dirty\n")), MG_OK, "write dirty failed");
+
+    assert_result(mg_command_restore(1, restore_args), MG_OK, "restore path failed");
+    read_text_file("file.txt", &file_contents);
+    assert_true(strcmp(file_contents, "one\n") == 0, "restore should write HEAD contents");
+    free(file_contents);
+
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(commit_read(&repo, commit_hash, &commit), MG_OK, "commit_read failed");
+    assert_result(tree_read(&repo, commit.tree_hash, &tree), MG_OK, "tree_read failed");
+    assert_result(index_load(&repo, &index), MG_OK, "index_load failed");
+
+    tree_entry = tree_find_entry(&tree, "file.txt");
+    index_entry = index_find_const(&index, "file.txt");
+    assert_true(tree_entry != NULL, "HEAD tree should contain file");
+    assert_true(index_entry != NULL, "index should contain restored file");
+    assert_true(strcmp(index_entry->hash, tree_entry->hash) == 0, "restore should reset index to HEAD");
+
+    index_free(&index);
+    tree_free(&tree);
+    commit_free(&commit);
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_restore_rejects_path_missing_from_head(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    char *restore_args[] = {"missing.txt"};
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_file("one\n", "one", commit_hash);
+
+    assert_result(mg_command_restore(1, restore_args), MG_NOT_FOUND, "restore should reject paths absent from HEAD");
+
+    (void)commit_hash;
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_detached_checkout_restores_commit();
     test_checkout_refuses_dirty_tracked_file();
     test_switch_restores_branch_and_updates_head();
+    test_restore_path_from_head();
+    test_restore_rejects_path_missing_from_head();
     puts("test_checkout passed");
     return 0;
 }
