@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "commands.h"
+#include "checkout.h"
 #include "commit.h"
 #include "fs.h"
 #include "hash.h"
@@ -546,12 +547,48 @@ MGResult mg_command_branch(int argc, char **argv) {
  */
 MGResult mg_command_switch(int argc, char **argv) {
     Repository repo;
+    char branch_commit[MG_HASH_HEX_SIZE];
     MGResult result = require_repo(&repo);
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("switch not implemented yet");
+    if (argc != 1) {
+        ignore_args(argc, argv);
+        puts("usage: minigit switch <branch>");
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_read_branch_commit(&repo, argv[0], branch_commit, sizeof(branch_commit));
+    if (result == MG_INVALID_ARG || result == MG_NOT_FOUND) {
+        puts("unknown branch");
+        return result;
+    }
+    if (result != MG_OK) {
+        puts("failed to read branch");
+        return result;
+    }
+    if (branch_commit[0] == '\0') {
+        puts("branch has no commits");
+        return MG_REPO_ERROR;
+    }
+
+    result = checkout_commit(&repo, branch_commit, 0);
+    if (result == MG_CONFLICT) {
+        puts("checkout would overwrite local changes");
+        return result;
+    }
+    if (result != MG_OK) {
+        puts("failed to switch branch");
+        return result;
+    }
+
+    result = repo_write_head_to_branch(&repo, argv[0]);
+    if (result != MG_OK) {
+        puts("failed to update HEAD");
+        return result;
+    }
+
+    printf("switched to branch %s\n", argv[0]);
     return MG_OK;
 }
 
@@ -564,7 +601,24 @@ MGResult mg_command_checkout(int argc, char **argv) {
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("checkout not implemented yet");
-    return MG_OK;
+    if (argc != 1) {
+        ignore_args(argc, argv);
+        puts("usage: minigit checkout <commit_hash>");
+        return MG_INVALID_ARG;
+    }
+    if (!hash_is_valid_hex(argv[0])) {
+        puts("unknown commit");
+        return MG_INVALID_ARG;
+    }
+
+    result = checkout_commit(&repo, argv[0], 1);
+    if (result == MG_CONFLICT) {
+        puts("checkout would overwrite local changes");
+    } else if (result == MG_NOT_FOUND || result == MG_PARSE_ERROR) {
+        puts("unknown commit");
+    } else if (result != MG_OK) {
+        puts("failed to checkout commit");
+    }
+
+    return result;
 }

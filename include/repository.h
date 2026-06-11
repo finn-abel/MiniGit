@@ -78,4 +78,19 @@ MGResult repo_create_branch(const Repository *repo, const char *name);
  */
 MGResult repo_list_branches(const Repository *repo, RepoBranchCallback callback, void *ctx);
 
+/*
+ * repo_branch_exists reports whether a branch ref exists.
+ */
+MGResult repo_branch_exists(const Repository *repo, const char *name, int *out_exists);
+
+/*
+ * repo_read_branch_commit reads a branch ref hash or an empty string.
+ */
+MGResult repo_read_branch_commit(const Repository *repo, const char *name, char *out, size_t out_size);
+
+/*
+ * repo_write_head_to_branch makes HEAD point at a branch ref.
+ */
+MGResult repo_write_head_to_branch(const Repository *repo, const char *name);
+
 #endif

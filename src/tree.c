@@ -301,6 +301,20 @@ MGResult tree_read(const Repository *repo, const char *hash, Tree *tree) {
     return MG_OK;
 }
 
+const TreeEntry *tree_find_entry(const Tree *tree, const char *path) {
+    if (tree == NULL || path == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < tree->count; i++) {
+        if (strcmp(tree->entries[i].path, path) == 0) {
+            return &tree->entries[i];
+        }
+    }
+
+    return NULL;
+}
+
 void tree_free(Tree *tree) {
     if (tree == NULL) {
         return;

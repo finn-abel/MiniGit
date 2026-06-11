@@ -41,6 +41,11 @@ MGResult tree_write(const Repository *repo, const Tree *tree, char out_hash[MG_H
 MGResult tree_read(const Repository *repo, const char *hash, Tree *tree);
 
 /*
+ * tree_find_entry returns the entry for path or NULL.
+ */
+const TreeEntry *tree_find_entry(const Tree *tree, const char *path);
+
+/*
  * tree_free releases memory owned by tree.
  */
 void tree_free(Tree *tree);

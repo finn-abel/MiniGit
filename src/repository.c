@@ -494,3 +494,88 @@ MGResult repo_list_branches(const Repository *repo, RepoBranchCallback callback,
     free(names);
     return result;
 }
+
+/*
+ * repo_branch_exists checks for a flat refs/heads/<name> file.
+ */
+MGResult repo_branch_exists(const Repository *repo, const char *name, int *out_exists) {
+    char refs_heads_path[MG_MAX_PATH];
+    char branch_path[MG_MAX_PATH];
+
+    if (repo == NULL || out_exists == NULL || !repo_branch_name_is_valid(name)) {
+        return MG_INVALID_ARG;
+    }
+    if (repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK ||
+        fs_join_path(refs_heads_path, name, branch_path, sizeof(branch_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+
+    *out_exists = fs_is_file(branch_path);
+    return MG_OK;
+}
+
+/*
+ * repo_read_branch_commit reads the commit hash stored in one branch ref.
+ * Empty branch files are preserved as empty strings for unborn branches.
+ */
+MGResult repo_read_branch_commit(const Repository *repo, const char *name, char *out, size_t out_size) {
+    char refs_heads_path[MG_MAX_PATH];
+    char branch_path[MG_MAX_PATH];
+    unsigned char *data = NULL;
+    size_t size = 0;
+    int exists;
+    MGResult result;
+
+    if (out == NULL || out_size == 0) {
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_branch_exists(repo, name, &exists);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (!exists) {
+        return MG_NOT_FOUND;
+    }
+
+    if (repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK ||
+        fs_join_path(refs_heads_path, name, branch_path, sizeof(branch_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (fs_read_file(branch_path, &data, &size) != MG_OK) {
+        return MG_IO_ERROR;
+    }
+
+    result = copy_trimmed_text(data, size, out, out_size);
+    free(data);
+    return result;
+}
+
+/*
+ * repo_write_head_to_branch reattaches HEAD to an existing branch.
+ */
+MGResult repo_write_head_to_branch(const Repository *repo, const char *name) {
+    char contents[MG_MAX_PATH];
+    int written;
+    int exists;
+    MGResult result;
+
+    if (repo == NULL || !repo_branch_name_is_valid(name)) {
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_branch_exists(repo, name, &exists);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (!exists) {
+        return MG_NOT_FOUND;
+    }
+
+    written = snprintf(contents, sizeof(contents), "ref: refs/heads/%s\n", name);
+    if (written < 0 || (size_t)written >= sizeof(contents)) {
+        return MG_INVALID_ARG;
+    }
+
+    return repo_write_head(repo, contents);
+}
