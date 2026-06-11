@@ -110,6 +110,9 @@ static void test_command_validation_before_repo_open(void) {
     char temp_dir[MG_MAX_PATH];
     char *bad_branch_args[] = {"bad/name"};
     char *bad_checkout_args[] = {"nope"};
+    char *bad_checkout_path_args[] = {"1111111", "file.txt"};
+    char *bad_checkout_missing_path_args[] = {"1111111", "--"};
+    char *bad_checkout_hash_path_args[] = {"nope", "--", "file.txt"};
 
     make_temp_dir("commands_validation", original_dir, temp_dir);
 
@@ -122,6 +125,9 @@ static void test_command_validation_before_repo_open(void) {
     assert_result(mg_command_branch(1, bad_branch_args), MG_INVALID_ARG, "bad branch should fail before repo open");
     assert_result(mg_command_switch(1, bad_branch_args), MG_INVALID_ARG, "bad switch branch should fail before repo open");
     assert_result(mg_command_checkout(1, bad_checkout_args), MG_INVALID_ARG, "bad checkout hash should fail before repo open");
+    assert_result(mg_command_checkout(2, bad_checkout_path_args), MG_INVALID_ARG, "checkout path without separator should fail before repo open");
+    assert_result(mg_command_checkout(2, bad_checkout_missing_path_args), MG_INVALID_ARG, "checkout path without path should fail before repo open");
+    assert_result(mg_command_checkout(3, bad_checkout_hash_path_args), MG_INVALID_ARG, "bad checkout path hash should fail before repo open");
 
     cleanup_temp_dir(original_dir, temp_dir);
 }

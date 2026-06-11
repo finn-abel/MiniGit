@@ -292,3 +292,54 @@ MGResult checkout_restore_path(const Repository *repo, const char *relative_path
     tree_free(&head_tree);
     return result;
 }
+
+/*
+ * checkout_restore_path_from_commit restores one tree entry from a commit without changing HEAD.
+ */
+MGResult checkout_restore_path_from_commit(
+    const Repository *repo,
+    const char commit_hash[MG_HASH_HEX_SIZE],
+    const char *relative_path
+) {
+    Commit commit;
+    Tree target_tree;
+    Index index;
+    const TreeEntry *entry;
+    MGResult result;
+
+    if (repo == NULL || !hash_is_valid_hex(commit_hash) || relative_path == NULL || relative_path[0] == '\0') {
+        return MG_INVALID_ARG;
+    }
+
+    result = commit_read(repo, commit_hash, &commit);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = tree_read(repo, commit.tree_hash, &target_tree);
+    commit_free(&commit);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    entry = tree_find_entry(&target_tree, relative_path);
+    if (entry == NULL) {
+        tree_free(&target_tree);
+        return MG_NOT_FOUND;
+    }
+
+    result = index_load(repo, &index);
+    if (result != MG_OK) {
+        tree_free(&target_tree);
+        return result;
+    }
+
+    result = restore_blob(repo, entry, &index);
+    if (result == MG_OK) {
+        result = index_save(repo, &index);
+    }
+
+    index_free(&index);
+    tree_free(&target_tree);
+    return result;
+}

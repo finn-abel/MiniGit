@@ -715,17 +715,21 @@ MGResult mg_command_switch(int argc, char **argv) {
 }
 
 /*
- * mg_command_checkout handles `minigit checkout <commit_hash>`.
+ * mg_command_checkout handles `minigit checkout <commit_hash>` and
+ * `minigit checkout <commit_hash> -- <path>`.
  */
 MGResult mg_command_checkout(int argc, char **argv) {
     Repository repo;
     Object object;
     char commit_hash[MG_HASH_HEX_SIZE];
+    char relative_path[MG_MAX_PATH];
+    int path_checkout;
     MGResult result;
 
-    if (argc != 1) {
+    path_checkout = argc == 3 && strcmp(argv[1], "--") == 0;
+    if (argc != 1 && !path_checkout) {
         ignore_args(argc, argv);
-        puts("usage: minigit checkout <commit>");
+        puts("usage: minigit checkout <commit> [-- <path>]");
         return MG_INVALID_ARG;
     }
     if (!checkout_commit_arg_is_valid(argv[0])) {
@@ -763,6 +767,26 @@ MGResult mg_command_checkout(int argc, char **argv) {
         return MG_NOT_FOUND;
     }
     object_free(&object);
+
+    if (path_checkout) {
+        if (fs_repo_relative_path(repo.worktree_path, argv[2], relative_path, sizeof(relative_path)) != MG_OK ||
+            relative_path[0] == '\0') {
+            puts("invalid path");
+            return MG_INVALID_ARG;
+        }
+
+        result = checkout_restore_path_from_commit(&repo, commit_hash, relative_path);
+        if (result == MG_NOT_FOUND) {
+            printf("path not found in commit: %s\n", relative_path);
+        } else if (result == MG_PARSE_ERROR) {
+            puts("unknown commit");
+        } else if (result != MG_OK) {
+            puts("failed to checkout path");
+        } else {
+            printf("checked out %s from %.7s\n", relative_path, commit_hash);
+        }
+        return result;
+    }
 
     result = checkout_commit(&repo, commit_hash, 1);
     if (result == MG_CONFLICT) {
