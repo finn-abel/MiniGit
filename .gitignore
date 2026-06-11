@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+dist/
+out/
+bin/
+obj/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+minigit
+
+# Generated dependency / compilation database files
+*.d
+compile_commands.json
+
+# Debug symbols and profiling output
+*.dSYM/
+*.gcda
+*.gcno
+*.gcov
+gmon.out
+
+# MiniGit repository data
+.minigit/
+
+# Editor and OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Agent files
+AGENT.md
