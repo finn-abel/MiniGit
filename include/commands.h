@@ -24,6 +24,11 @@ MGResult mg_command_rm(int argc, char **argv);
 MGResult mg_command_status(int argc, char **argv);
 
 /*
+ * mg_command_diff handles `minigit diff [--staged|--cached|HEAD]`.
+ */
+MGResult mg_command_diff(int argc, char **argv);
+
+/*
  * mg_command_commit handles `minigit commit -m <message>`.
  */
 MGResult mg_command_commit(int argc, char **argv);

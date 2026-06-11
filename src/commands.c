@@ -8,6 +8,7 @@
 #include "commands.h"
 #include "checkout.h"
 #include "commit.h"
+#include "diff.h"
 #include "fs.h"
 #include "hash.h"
 #include "index.h"
@@ -427,6 +428,36 @@ MGResult mg_command_status(int argc, char **argv) {
     result = status_print(&repo);
     if (result != MG_OK) {
         puts("failed to get status");
+    }
+    return result;
+}
+
+/*
+ * mg_command_diff handles `minigit diff [--staged|--cached|HEAD]`.
+ */
+MGResult mg_command_diff(int argc, char **argv) {
+    Repository repo;
+    DiffMode mode = DIFF_WORKTREE;
+    MGResult result;
+
+    if (argc == 1 && (strcmp(argv[0], "--staged") == 0 || strcmp(argv[0], "--cached") == 0)) {
+        mode = DIFF_STAGED;
+    } else if (argc == 1 && strcmp(argv[0], "HEAD") == 0) {
+        mode = DIFF_HEAD;
+    } else if (argc != 0) {
+        ignore_args(argc, argv);
+        puts("usage: minigit diff [--staged|--cached|HEAD]");
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = diff_print(&repo, mode);
+    if (result != MG_OK) {
+        puts("failed to diff");
     }
     return result;
 }

@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
         result = mg_command_rm(argc - 2, argv + 2);
     } else if (strcmp(command, "status") == 0) {
         result = mg_command_status(argc - 2, argv + 2);
+    } else if (strcmp(command, "diff") == 0) {
+        result = mg_command_diff(argc - 2, argv + 2);
     } else if (strcmp(command, "commit") == 0) {
         result = mg_command_commit(argc - 2, argv + 2);
     } else if (strcmp(command, "log") == 0) {

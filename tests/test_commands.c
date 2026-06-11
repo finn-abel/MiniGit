@@ -116,6 +116,7 @@ static void test_command_validation_before_repo_open(void) {
     assert_result(mg_command_add(0, NULL), MG_INVALID_ARG, "add without paths should fail before repo open");
     assert_result(mg_command_rm(0, NULL), MG_INVALID_ARG, "rm without paths should fail before repo open");
     assert_result(mg_command_commit(0, NULL), MG_INVALID_ARG, "commit without message should fail before repo open");
+    assert_result(mg_command_diff(1, bad_checkout_args), MG_INVALID_ARG, "bad diff mode should fail before repo open");
     assert_result(mg_command_branch(1, bad_branch_args), MG_INVALID_ARG, "bad branch should fail before repo open");
     assert_result(mg_command_switch(1, bad_branch_args), MG_INVALID_ARG, "bad switch branch should fail before repo open");
     assert_result(mg_command_checkout(1, bad_checkout_args), MG_INVALID_ARG, "bad checkout hash should fail before repo open");
