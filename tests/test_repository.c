@@ -180,10 +180,44 @@ static void test_branch_create_and_validation(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_branch_delete(void) {
+    Repository repo;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    int exists;
+    const char *commit_hash = "4444444444444444444444444444444444444444444444444444444444444444";
+    const char *detached_hash = "5555555555555555555555555555555555555555555555555555555555555555";
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(repo_init(&repo), MG_OK, "repo_init failed");
+    assert_result(repo_update_current_ref(&repo, commit_hash), MG_OK, "repo_update_current_ref failed");
+    assert_result(repo_create_branch(&repo, "feature"), MG_OK, "create feature branch failed");
+
+    assert_result(repo_delete_branch(&repo, "bad/name"), MG_INVALID_ARG, "delete invalid branch should fail");
+    assert_result(repo_delete_branch(&repo, "missing"), MG_NOT_FOUND, "delete missing branch should fail");
+    assert_result(repo_delete_branch(&repo, "main"), MG_CONFLICT, "delete current branch should fail");
+    assert_result(repo_branch_exists(&repo, "main", &exists), MG_OK, "main existence check failed");
+    assert_true(exists, "main should still exist after refused delete");
+
+    assert_result(repo_delete_branch(&repo, "feature"), MG_OK, "delete feature branch failed");
+    assert_result(repo_branch_exists(&repo, "feature", &exists), MG_OK, "feature existence check failed");
+    assert_true(!exists, "feature should be removed");
+    assert_result(repo_delete_branch(&repo, "feature"), MG_NOT_FOUND, "delete removed branch should fail");
+
+    assert_result(repo_create_branch(&repo, "detached-delete"), MG_OK, "create detached-delete branch failed");
+    assert_result(repo_write_head(&repo, detached_hash), MG_OK, "detach HEAD failed");
+    assert_result(repo_delete_branch(&repo, "detached-delete"), MG_OK, "delete branch while detached failed");
+    assert_result(repo_branch_exists(&repo, "detached-delete", &exists), MG_OK, "detached-delete existence check failed");
+    assert_true(!exists, "detached-delete should be removed");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_init_and_open();
     test_ref_updates_and_detached_head();
     test_branch_create_and_validation();
+    test_branch_delete();
     puts("All repository tests passed.");
     return 0;
 }

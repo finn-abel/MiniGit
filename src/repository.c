@@ -399,6 +399,43 @@ MGResult repo_create_branch(const Repository *repo, const char *name) {
 }
 
 /*
+ * repo_delete_branch removes a flat local branch ref.
+ */
+MGResult repo_delete_branch(const Repository *repo, const char *name) {
+    char current_branch[MG_MAX_BRANCH];
+    char refs_heads_path[MG_MAX_PATH];
+    char branch_path[MG_MAX_PATH];
+    int exists;
+    MGResult result;
+
+    if (repo == NULL || !repo_branch_name_is_valid(name)) {
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_branch_exists(repo, name, &exists);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (!exists) {
+        return MG_NOT_FOUND;
+    }
+
+    result = repo_current_branch(repo, current_branch, sizeof(current_branch));
+    if (result == MG_OK && strcmp(current_branch, name) == 0) {
+        return MG_CONFLICT;
+    }
+    if (result != MG_OK && result != MG_NOT_FOUND) {
+        return result;
+    }
+
+    if (repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK ||
+        fs_join_path(refs_heads_path, name, branch_path, sizeof(branch_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    return fs_remove_file(branch_path);
+}
+
+/*
  * repo_list_branches visits flat local branches in sorted order.
  */
 MGResult repo_list_branches(const Repository *repo, RepoBranchCallback callback, void *ctx) {

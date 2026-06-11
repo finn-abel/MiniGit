@@ -592,7 +592,7 @@ MGResult mg_command_log(int argc, char **argv) {
 }
 
 /*
- * mg_command_branch handles `minigit branch [name]`.
+ * mg_command_branch handles `minigit branch [name]` and `minigit branch -d <name>`.
  */
 MGResult mg_command_branch(int argc, char **argv) {
     Repository repo;
@@ -605,8 +605,33 @@ MGResult mg_command_branch(int argc, char **argv) {
         }
         return repo_list_branches(&repo, print_branch_name, NULL);
     }
+    if (argc == 2 && strcmp(argv[0], "-d") == 0) {
+        if (!repo_branch_name_is_valid(argv[1])) {
+            print_invalid_branch_name(argv[1]);
+            return MG_INVALID_ARG;
+        }
+
+        result = require_repo(&repo);
+        if (result != MG_OK) {
+            return result;
+        }
+
+        result = repo_delete_branch(&repo, argv[1]);
+        if (result == MG_INVALID_ARG) {
+            print_invalid_branch_name(argv[1]);
+        } else if (result == MG_NOT_FOUND) {
+            puts("unknown branch");
+        } else if (result == MG_CONFLICT) {
+            puts("cannot delete current branch");
+        } else if (result != MG_OK) {
+            puts("failed to delete branch");
+        } else {
+            printf("deleted branch %s\n", argv[1]);
+        }
+        return result;
+    }
     if (argc != 1) {
-        puts("usage: minigit branch [name]");
+        puts("usage: minigit branch [-d <name>|<name>]");
         return MG_INVALID_ARG;
     }
     if (!repo_branch_name_is_valid(argv[0])) {

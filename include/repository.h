@@ -74,6 +74,11 @@ int repo_branch_name_is_valid(const char *name);
 MGResult repo_create_branch(const Repository *repo, const char *name);
 
 /*
+ * repo_delete_branch removes a branch ref unless it is the current branch.
+ */
+MGResult repo_delete_branch(const Repository *repo, const char *name);
+
+/*
  * repo_list_branches visits every local branch in sorted order.
  */
 MGResult repo_list_branches(const Repository *repo, RepoBranchCallback callback, void *ctx);

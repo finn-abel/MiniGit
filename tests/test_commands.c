@@ -197,11 +197,48 @@ static void test_branch_command_create(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_branch_command_delete(void) {
+    Repository repo;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char refs_heads_path[MG_MAX_PATH];
+    char feature_ref_path[MG_MAX_PATH];
+    char *add_args[] = {"README.md"};
+    char *commit_args[] = {"-m", "initial commit"};
+    char *branch_args[] = {"feature"};
+    char *delete_args[] = {"-d", "feature"};
+    char *delete_main_args[] = {"-d", "main"};
+    char *delete_missing_args[] = {"-d", "missing"};
+    const unsigned char contents[] = "hello\n";
+
+    make_temp_dir("commands_branch_delete", original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init should create repo for branch delete test");
+    assert_result(fs_write_file("README.md", contents, sizeof(contents) - 1), MG_OK, "write README failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "add command failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit command failed");
+    assert_result(mg_command_branch(1, branch_args), MG_OK, "branch create failed");
+
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(fs_join_path(repo.gitdir_path, "refs/heads", refs_heads_path, sizeof(refs_heads_path)), MG_OK, "refs path failed");
+    assert_result(fs_join_path(refs_heads_path, "feature", feature_ref_path, sizeof(feature_ref_path)), MG_OK, "feature path failed");
+    assert_true(fs_is_file(feature_ref_path), "feature ref should exist before delete");
+
+    assert_result(mg_command_branch(2, delete_main_args), MG_CONFLICT, "deleting current branch should fail");
+    assert_result(mg_command_branch(2, delete_args), MG_OK, "branch delete failed");
+    assert_true(!fs_exists(feature_ref_path), "feature ref should be removed");
+    assert_result(mg_command_branch(2, delete_args), MG_NOT_FOUND, "deleting removed branch should fail");
+    assert_result(mg_command_branch(2, delete_missing_args), MG_NOT_FOUND, "deleting unknown branch should fail");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_repo_required_commands();
     test_command_validation_before_repo_open();
     test_commit_and_log_commands();
     test_branch_command_create();
+    test_branch_command_delete();
     puts("All commands tests passed.");
     return 0;
 }
