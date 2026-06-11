@@ -39,6 +39,11 @@ MGResult mg_command_commit(int argc, char **argv);
 MGResult mg_command_log(int argc, char **argv);
 
 /*
+ * mg_command_show handles `minigit show <commit>`.
+ */
+MGResult mg_command_show(int argc, char **argv);
+
+/*
  * mg_command_branch handles `minigit branch [name]`.
  */
 MGResult mg_command_branch(int argc, char **argv);

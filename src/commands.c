@@ -297,6 +297,41 @@ static MGResult print_commit_log_entry(const char *hash, const Commit *commit) {
 }
 
 /*
+ * print_commit_show prints commit metadata and the files in its tree.
+ */
+static MGResult print_commit_show(const Repository *repo, const char *hash, const Commit *commit) {
+    Tree tree;
+    char date[128];
+    MGResult result;
+
+    if (repo == NULL || hash == NULL || commit == NULL) {
+        return MG_INVALID_ARG;
+    }
+
+    result = commit_format_timestamp(commit->timestamp, date, sizeof(date));
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = tree_read(repo, commit->tree_hash, &tree);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    printf("commit %s\n", hash);
+    printf("Author: %s <%s>\n", commit->author_name, commit->author_email);
+    printf("Date: %s\n\n", date);
+    printf("    %s\n\n", commit->message);
+    puts("Files:");
+    for (size_t i = 0; i < tree.count; i++) {
+        printf("  100644 blob %s %zu\t%s\n", tree.entries[i].hash, tree.entries[i].size, tree.entries[i].path);
+    }
+
+    tree_free(&tree);
+    return MG_OK;
+}
+
+/*
  * print_branch_name prints one branch list entry.
  */
 static MGResult print_branch_name(const char *branch_name, int is_current, void *ctx) {
@@ -608,6 +643,71 @@ MGResult mg_command_log(int argc, char **argv) {
     }
 
     return MG_OK;
+}
+
+/*
+ * mg_command_show handles `minigit show <commit>`.
+ */
+MGResult mg_command_show(int argc, char **argv) {
+    Repository repo;
+    Object object;
+    Commit commit;
+    char commit_hash[MG_HASH_HEX_SIZE];
+    MGResult result;
+
+    if (argc != 1) {
+        ignore_args(argc, argv);
+        puts("usage: minigit show <commit>");
+        return MG_INVALID_ARG;
+    }
+    if (!checkout_commit_arg_is_valid(argv[0])) {
+        puts("unknown commit");
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = object_resolve_prefix(&repo, argv[0], commit_hash);
+    if (result == MG_CONFLICT) {
+        puts("ambiguous object prefix");
+        return result;
+    }
+    if (result == MG_INVALID_ARG || result == MG_NOT_FOUND) {
+        puts("unknown commit");
+        return result;
+    }
+    if (result != MG_OK) {
+        puts("failed to resolve commit");
+        return result;
+    }
+
+    result = object_read(&repo, commit_hash, &object);
+    if (result != MG_OK) {
+        puts("unknown commit");
+        return result;
+    }
+    if (strcmp(object.type, "commit") != 0) {
+        object_free(&object);
+        puts("unknown commit");
+        return MG_NOT_FOUND;
+    }
+    object_free(&object);
+
+    result = commit_read(&repo, commit_hash, &commit);
+    if (result != MG_OK) {
+        puts("failed to read commit");
+        return result;
+    }
+
+    result = print_commit_show(&repo, commit_hash, &commit);
+    commit_free(&commit);
+    if (result != MG_OK) {
+        puts("failed to show commit");
+    }
+    return result;
 }
 
 /*

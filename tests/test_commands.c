@@ -92,6 +92,43 @@ static void cleanup_temp_dir(const char *original_dir, const char *temp_dir) {
     remove_recursive(temp_dir);
 }
 
+static void capture_stdout_start(const char *path, int *saved_stdout) {
+    fflush(stdout);
+    *saved_stdout = dup(STDOUT_FILENO);
+    if (*saved_stdout < 0) {
+        fprintf(stderr, "dup stdout failed\n");
+        exit(1);
+    }
+    if (freopen(path, "wb", stdout) == NULL) {
+        fprintf(stderr, "freopen stdout failed\n");
+        exit(1);
+    }
+}
+
+static char *capture_stdout_end(int saved_stdout, const char *path) {
+    unsigned char *data = NULL;
+    size_t size = 0;
+
+    fflush(stdout);
+    if (dup2(saved_stdout, STDOUT_FILENO) < 0) {
+        fprintf(stderr, "restore stdout failed\n");
+        exit(1);
+    }
+    close(saved_stdout);
+    clearerr(stdout);
+
+    assert_result(fs_read_file(path, &data, &size), MG_OK, "read captured stdout failed");
+    (void)size;
+    return (char *)data;
+}
+
+static void assert_contains(const char *haystack, const char *needle, const char *message) {
+    if (strstr(haystack, needle) == NULL) {
+        fprintf(stderr, "%s\nmissing: %s\noutput:\n%s\n", message, needle, haystack);
+        exit(1);
+    }
+}
+
 static void test_repo_required_commands(void) {
     char original_dir[MG_MAX_PATH];
     char temp_dir[MG_MAX_PATH];
@@ -163,6 +200,48 @@ static void test_commit_and_log_commands(void) {
 
     assert_result(mg_command_log(0, NULL), MG_OK, "log command failed after commit");
     assert_result(mg_command_commit(2, again_args), MG_OK, "unchanged commit should return success");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_show_command(void) {
+    Repository repo;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    char commit_prefix[8];
+    char *add_args[] = {"README.md"};
+    char *commit_args[] = {"-m", "initial commit"};
+    char *show_args[] = {commit_prefix};
+    char *bad_show_args[] = {"nope"};
+    char *output;
+    int saved_stdout;
+    const unsigned char contents[] = "hello\n";
+
+    make_temp_dir("commands_show", original_dir, temp_dir);
+
+    assert_result(mg_command_show(0, NULL), MG_INVALID_ARG, "show without commit should fail before repo open");
+    assert_result(mg_command_show(1, bad_show_args), MG_INVALID_ARG, "bad show hash should fail before repo open");
+    assert_result(mg_command_init(0, NULL), MG_OK, "init should create repo for show test");
+    assert_result(fs_write_file("README.md", contents, sizeof(contents) - 1), MG_OK, "write README failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "add command failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit command failed");
+
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(repo_current_commit(&repo, commit_hash, sizeof(commit_hash)), MG_OK, "repo_current_commit failed");
+    memcpy(commit_prefix, commit_hash, 7);
+    commit_prefix[7] = '\0';
+
+    capture_stdout_start("show.out", &saved_stdout);
+    assert_result(mg_command_show(1, show_args), MG_OK, "show command failed");
+    output = capture_stdout_end(saved_stdout, "show.out");
+
+    assert_contains(output, "commit ", "show should include commit header");
+    assert_contains(output, "Author: MiniGit User <minigit@example.com>\n", "show should include author");
+    assert_contains(output, "    initial commit\n", "show should include message");
+    assert_contains(output, "Files:\n", "show should include files heading");
+    assert_contains(output, "\tREADME.md\n", "show should include tree entry path");
+    free(output);
 
     cleanup_temp_dir(original_dir, temp_dir);
 }
@@ -273,6 +352,7 @@ int main(void) {
     test_repo_required_commands();
     test_command_validation_before_repo_open();
     test_commit_and_log_commands();
+    test_show_command();
     test_branch_command_create();
     test_branch_command_delete();
     test_add_respects_minigitignore();

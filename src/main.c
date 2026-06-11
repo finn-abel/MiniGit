@@ -44,6 +44,8 @@ int main(int argc, char **argv) {
         result = mg_command_commit(argc - 2, argv + 2);
     } else if (strcmp(command, "log") == 0) {
         result = mg_command_log(argc - 2, argv + 2);
+    } else if (strcmp(command, "show") == 0) {
+        result = mg_command_show(argc - 2, argv + 2);
     } else if (strcmp(command, "branch") == 0) {
         result = mg_command_branch(argc - 2, argv + 2);
     } else if (strcmp(command, "switch") == 0) {
