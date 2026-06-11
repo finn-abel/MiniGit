@@ -61,6 +61,11 @@ MGResult fs_parent_dir(const char *path, char *out, size_t out_size);
 MGResult fs_remove_file(const char *path);
 
 /*
+ * fs_repo_relative_path normalizes path to a repo-relative path.
+ */
+MGResult fs_repo_relative_path(const char *repo_root, const char *path, char *out, size_t out_size);
+
+/*
  * fs_walk visits regular files below root_path using repo-relative paths.
  */
 MGResult fs_walk(const char *root_path, FSWalkCallback callback, void *ctx);

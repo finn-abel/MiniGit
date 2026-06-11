@@ -264,6 +264,72 @@ MGResult fs_remove_file(const char *path) {
 }
 
 /*
+ * path_has_forbidden_segment rejects traversal and .minigit storage paths.
+ */
+static int path_has_forbidden_segment(const char *path) {
+    const char *segment = path;
+
+    while (*segment != '\0') {
+        const char *end = strchr(segment, '/');
+        size_t len = end == NULL ? strlen(segment) : (size_t)(end - segment);
+
+        if ((len == 2 && strncmp(segment, "..", len) == 0) ||
+            (len == 8 && strncmp(segment, ".minigit", len) == 0)) {
+            return 1;
+        }
+
+        if (end == NULL) {
+            break;
+        }
+        segment = end + 1;
+    }
+
+    return 0;
+}
+
+/*
+ * fs_repo_relative_path converts user input to a stable repo-relative path.
+ */
+MGResult fs_repo_relative_path(const char *repo_root, const char *path, char *out, size_t out_size) {
+    const char *relative = path;
+    size_t root_len;
+    size_t len;
+
+    if (repo_root == NULL || path == NULL || out == NULL || out_size == 0 || path[0] == '\0') {
+        return MG_INVALID_ARG;
+    }
+
+    root_len = strlen(repo_root);
+    if (path[0] == '/') {
+        if (strncmp(path, repo_root, root_len) != 0 || (path[root_len] != '\0' && path[root_len] != '/')) {
+            return MG_INVALID_ARG;
+        }
+        relative = path + root_len;
+        if (*relative == '/') {
+            relative++;
+        }
+    }
+
+    while (relative[0] == '.' && relative[1] == '/') {
+        relative += 2;
+    }
+    if (strcmp(relative, ".") == 0) {
+        relative = "";
+    }
+    if (relative[0] == '/' || path_has_forbidden_segment(relative)) {
+        return MG_INVALID_ARG;
+    }
+
+    len = strlen(relative);
+    if (len >= out_size) {
+        return MG_INVALID_ARG;
+    }
+
+    memcpy(out, relative, len + 1);
+    return MG_OK;
+}
+
+/*
  * walk_dir recursively visits regular files in sorted order.
  */
 static MGResult walk_dir(const char *root_path, const char *relative_path, FSWalkCallback callback, void *ctx) {
