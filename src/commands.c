@@ -14,6 +14,7 @@
 #include "index.h"
 #include "object.h"
 #include "repository.h"
+#include "reset.h"
 #include "status.h"
 #include "tree.h"
 
@@ -786,6 +787,43 @@ MGResult mg_command_restore(int argc, char **argv) {
         puts("failed to restore path");
     } else {
         printf("restored %s\n", relative_path);
+    }
+
+    return result;
+}
+
+/*
+ * mg_command_reset handles `minigit reset <path>`.
+ */
+MGResult mg_command_reset(int argc, char **argv) {
+    Repository repo;
+    char relative_path[MG_MAX_PATH];
+    MGResult result;
+
+    if (argc != 1) {
+        ignore_args(argc, argv);
+        puts("usage: minigit reset <path>");
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    if (fs_repo_relative_path(repo.worktree_path, argv[0], relative_path, sizeof(relative_path)) != MG_OK ||
+        relative_path[0] == '\0') {
+        puts("invalid path");
+        return MG_INVALID_ARG;
+    }
+
+    result = reset_path(&repo, relative_path);
+    if (result == MG_NOT_FOUND) {
+        printf("path not staged or tracked: %s\n", relative_path);
+    } else if (result != MG_OK) {
+        puts("failed to reset path");
+    } else {
+        printf("unstaged %s\n", relative_path);
     }
 
     return result;
