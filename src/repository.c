@@ -2,6 +2,8 @@
 
 #include "repository.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -299,5 +301,196 @@ MGResult repo_head_display_name(const Repository *repo, char *out, size_t out_si
         return MG_OK;
     }
 
+    return result;
+}
+
+/*
+ * compare_names sorts branch names for stable listing.
+ * Branch output should not depend on filesystem directory order.
+ */
+static int compare_names(const void *left, const void *right) {
+    const char *const *a = left;
+    const char *const *b = right;
+    return strcmp(*a, *b);
+}
+
+/*
+ * copy_name owns a branch name while listing refs.
+ * dirent names are reused by readdir, so the list stores private copies.
+ */
+static char *copy_name(const char *name) {
+    size_t len = strlen(name) + 1;
+    char *copy = malloc(len);
+    if (copy == NULL) {
+        return NULL;
+    }
+    memcpy(copy, name, len);
+    return copy;
+}
+
+/*
+ * repo_branch_name_is_valid enforces the v1 branch-name subset.
+ * Keeping names flat avoids path traversal and nested ref directories.
+ */
+int repo_branch_name_is_valid(const char *name) {
+    if (name == NULL || name[0] == '\0' || strlen(name) >= MG_MAX_BRANCH) {
+        return 0;
+    }
+    if (strstr(name, "..") != NULL) {
+        return 0;
+    }
+
+    /*
+     * Spaces and control bytes make command output and ref files awkward; v1
+     * rejects them instead of adding quoting rules.
+     */
+    for (size_t i = 0; name[i] != '\0'; i++) {
+        unsigned char ch = (unsigned char)name[i];
+        if (ch == '/' || isspace(ch) || iscntrl(ch)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/*
+ * repo_create_branch writes refs/heads/<name> at the current commit.
+ */
+MGResult repo_create_branch(const Repository *repo, const char *name) {
+    char current_commit[MG_HASH_HEX_SIZE];
+    char refs_heads_path[MG_MAX_PATH];
+    char branch_path[MG_MAX_PATH];
+    char contents[MG_HASH_HEX_SIZE + 1];
+    int written;
+    MGResult result;
+
+    if (repo == NULL || !repo_branch_name_is_valid(name)) {
+        return MG_INVALID_ARG;
+    }
+
+    /*
+     * A branch is just a named commit pointer, so creating one before the first
+     * commit would produce an unusable empty ref.
+     */
+    result = repo_current_commit(repo, current_commit, sizeof(current_commit));
+    if (result != MG_OK) {
+        return result;
+    }
+    if (current_commit[0] == '\0') {
+        return MG_REPO_ERROR;
+    }
+
+    if (repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK ||
+        fs_join_path(refs_heads_path, name, branch_path, sizeof(branch_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    /* Ref creation is intentionally non-overwriting. */
+    if (fs_exists(branch_path)) {
+        return MG_CONFLICT;
+    }
+
+    written = snprintf(contents, sizeof(contents), "%s\n", current_commit);
+    if (written < 0 || (size_t)written >= sizeof(contents)) {
+        return MG_INVALID_ARG;
+    }
+
+    return fs_write_file(branch_path, (const unsigned char *)contents, strlen(contents));
+}
+
+/*
+ * repo_list_branches visits flat local branches in sorted order.
+ */
+MGResult repo_list_branches(const Repository *repo, RepoBranchCallback callback, void *ctx) {
+    char refs_heads_path[MG_MAX_PATH];
+    char current_branch[MG_MAX_BRANCH];
+    DIR *dir;
+    struct dirent *entry;
+    char **names = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    MGResult result = MG_OK;
+
+    if (repo == NULL || callback == NULL) {
+        return MG_INVALID_ARG;
+    }
+    if (repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+
+    /*
+     * Detached HEAD has no current branch, but branch listing still works; no
+     * branch will be marked current in that case.
+     */
+    result = repo_current_branch(repo, current_branch, sizeof(current_branch));
+    if (result == MG_NOT_FOUND) {
+        current_branch[0] = '\0';
+        result = MG_OK;
+    }
+    if (result != MG_OK) {
+        return result;
+    }
+
+    dir = opendir(refs_heads_path);
+    if (dir == NULL) {
+        return MG_IO_ERROR;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char **grown;
+        char branch_path[MG_MAX_PATH];
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        /* Ignore any ref file outside the v1 branch-name subset. */
+        if (!repo_branch_name_is_valid(entry->d_name)) {
+            continue;
+        }
+        if (fs_join_path(refs_heads_path, entry->d_name, branch_path, sizeof(branch_path)) != MG_OK) {
+            result = MG_INVALID_ARG;
+            break;
+        }
+        if (!fs_is_file(branch_path)) {
+            continue;
+        }
+
+        if (count == capacity) {
+            capacity = capacity == 0 ? 8 : capacity * 2;
+            grown = realloc(names, capacity * sizeof(names[0]));
+            if (grown == NULL) {
+                result = MG_ERROR;
+                break;
+            }
+            names = grown;
+        }
+
+        names[count] = copy_name(entry->d_name);
+        if (names[count] == NULL) {
+            result = MG_ERROR;
+            break;
+        }
+        count++;
+    }
+
+    if (closedir(dir) != 0 && result == MG_OK) {
+        result = MG_IO_ERROR;
+    }
+
+    if (result == MG_OK) {
+        /* Sort after reading all names so callback order is deterministic. */
+        qsort(names, count, sizeof(names[0]), compare_names);
+        for (size_t i = 0; i < count; i++) {
+            result = callback(names[i], strcmp(names[i], current_branch) == 0, ctx);
+            if (result != MG_OK) {
+                break;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        free(names[i]);
+    }
+    free(names);
     return result;
 }

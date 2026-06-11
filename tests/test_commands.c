@@ -139,9 +139,47 @@ static void test_commit_and_log_commands(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_branch_command_create(void) {
+    Repository repo;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    unsigned char *feature_ref = NULL;
+    size_t feature_ref_size = 0;
+    char *add_args[] = {"README.md"};
+    char *commit_args[] = {"-m", "initial commit"};
+    char *branch_args[] = {"feature"};
+    char *bad_branch_args[] = {"bad/name"};
+    const unsigned char contents[] = "hello\n";
+
+    make_temp_dir("commands_branch", original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init should create repo for branch test");
+    assert_result(mg_command_branch(0, NULL), MG_OK, "branch list should work before commits");
+    assert_result(mg_command_branch(1, branch_args), MG_REPO_ERROR, "branch before commit should fail");
+    assert_result(fs_write_file("README.md", contents, sizeof(contents) - 1), MG_OK, "write README failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "add command failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit command failed");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(repo_current_commit(&repo, commit_hash, sizeof(commit_hash)), MG_OK, "repo_current_commit failed");
+
+    assert_result(mg_command_branch(1, branch_args), MG_OK, "branch create failed");
+    assert_result(mg_command_branch(1, branch_args), MG_CONFLICT, "duplicate branch should fail");
+    assert_result(mg_command_branch(1, bad_branch_args), MG_INVALID_ARG, "invalid branch should fail");
+    assert_result(mg_command_branch(0, NULL), MG_OK, "branch list should work after create");
+
+    assert_result(fs_read_file(".minigit/refs/heads/feature", &feature_ref, &feature_ref_size), MG_OK, "read feature ref failed");
+    assert_true(feature_ref_size == MG_HASH_HEX_SIZE, "feature ref should include hash plus newline");
+    assert_true(strncmp((const char *)feature_ref, commit_hash, MG_HASH_HEX_SIZE - 1) == 0, "feature ref hash mismatch");
+    free(feature_ref);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_repo_required_commands();
     test_commit_and_log_commands();
+    test_branch_command_create();
     puts("All commands tests passed.");
     return 0;
 }

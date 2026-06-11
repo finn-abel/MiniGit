@@ -251,6 +251,15 @@ static MGResult print_commit_log_entry(const char *hash, const Commit *commit) {
 }
 
 /*
+ * print_branch_name prints one branch list entry.
+ */
+static MGResult print_branch_name(const char *branch_name, int is_current, void *ctx) {
+    (void)ctx;
+    printf("%c %s\n", is_current ? '*' : ' ', branch_name);
+    return MG_OK;
+}
+
+/*
  * mg_command_init handles `minigit init`.
  */
 MGResult mg_command_init(int argc, char **argv) {
@@ -511,9 +520,25 @@ MGResult mg_command_branch(int argc, char **argv) {
     if (result != MG_OK) {
         return result;
     }
-    ignore_args(argc, argv);
-    puts("branch not implemented yet");
-    return MG_OK;
+    if (argc == 0) {
+        return repo_list_branches(&repo, print_branch_name, NULL);
+    }
+    if (argc != 1) {
+        puts("usage: minigit branch [name]");
+        return MG_INVALID_ARG;
+    }
+
+    result = repo_create_branch(&repo, argv[0]);
+    if (result == MG_INVALID_ARG) {
+        puts("invalid branch name");
+    } else if (result == MG_REPO_ERROR) {
+        puts("cannot create branch before first commit");
+    } else if (result == MG_CONFLICT) {
+        puts("branch already exists");
+    } else if (result != MG_OK) {
+        puts("failed to create branch");
+    }
+    return result;
 }
 
 /*

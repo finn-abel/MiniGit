@@ -146,9 +146,44 @@ static void test_ref_updates_and_detached_head(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_branch_create_and_validation(void) {
+    Repository repo;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char current_hash[MG_HASH_HEX_SIZE];
+    unsigned char *feature_ref = NULL;
+    size_t feature_ref_size = 0;
+    const char *commit_hash = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(repo_init(&repo), MG_OK, "repo_init failed");
+
+    assert_true(repo_branch_name_is_valid("feature"), "feature should be valid");
+    assert_true(!repo_branch_name_is_valid(""), "empty branch should be invalid");
+    assert_true(!repo_branch_name_is_valid("bad/name"), "slash branch should be invalid");
+    assert_true(!repo_branch_name_is_valid("bad name"), "space branch should be invalid");
+    assert_true(!repo_branch_name_is_valid("bad..name"), "dot-dot branch should be invalid");
+
+    assert_result(repo_create_branch(&repo, "feature"), MG_REPO_ERROR, "branch before commit should fail");
+    assert_result(repo_update_current_ref(&repo, commit_hash), MG_OK, "repo_update_current_ref failed");
+    assert_result(repo_current_commit(&repo, current_hash, sizeof(current_hash)), MG_OK, "repo_current_commit failed");
+    assert_true(strcmp(current_hash, commit_hash) == 0, "current commit mismatch");
+
+    assert_result(repo_create_branch(&repo, "feature"), MG_OK, "create feature branch failed");
+    assert_result(repo_create_branch(&repo, "feature"), MG_CONFLICT, "duplicate branch should fail");
+    assert_result(repo_create_branch(&repo, "bad/name"), MG_INVALID_ARG, "invalid branch should fail");
+    assert_result(fs_read_file(".minigit/refs/heads/feature", &feature_ref, &feature_ref_size), MG_OK, "read feature ref failed");
+    assert_true(feature_ref_size == MG_HASH_HEX_SIZE, "feature ref should include hash plus newline");
+    assert_true(strncmp((const char *)feature_ref, commit_hash, MG_HASH_HEX_SIZE - 1) == 0, "feature ref hash mismatch");
+    free(feature_ref);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_init_and_open();
     test_ref_updates_and_detached_head();
+    test_branch_create_and_validation();
     puts("All repository tests passed.");
     return 0;
 }

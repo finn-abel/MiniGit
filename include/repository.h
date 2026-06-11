@@ -6,6 +6,11 @@
 #include "common.h"
 
 /*
+ * RepoBranchCallback is called once for each branch name.
+ */
+typedef MGResult (*RepoBranchCallback)(const char *branch_name, int is_current, void *ctx);
+
+/*
  * Repository stores paths to the working tree and internal .minigit directory.
  */
 typedef struct {
@@ -57,5 +62,20 @@ MGResult repo_update_current_ref(const Repository *repo, const char *commit_hash
  * repo_head_display_name writes the current branch name or "detached".
  */
 MGResult repo_head_display_name(const Repository *repo, char *out, size_t out_size);
+
+/*
+ * repo_branch_name_is_valid reports whether name is accepted in v1.
+ */
+int repo_branch_name_is_valid(const char *name);
+
+/*
+ * repo_create_branch creates a branch at the current commit.
+ */
+MGResult repo_create_branch(const Repository *repo, const char *name);
+
+/*
+ * repo_list_branches visits every local branch in sorted order.
+ */
+MGResult repo_list_branches(const Repository *repo, RepoBranchCallback callback, void *ctx);
 
 #endif
