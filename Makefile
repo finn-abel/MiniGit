@@ -13,10 +13,10 @@ endif
 TARGET = minigit
 
 # Add normal project source files here.
-SRC = src/main.c src/commands.c src/fs.c src/hash.c src/index.c src/object.c src/repository.c
+SRC = src/main.c src/commands.c src/commit.c src/fs.c src/hash.c src/index.c src/object.c src/repository.c src/tree.c
 
 # Add test source files here.
-TEST_SRC = tests/test_commands.c tests/test_fs.c tests/test_hash.c tests/test_index.c tests/test_object.c
+TEST_SRC = tests/test_commands.c tests/test_commit.c tests/test_fs.c tests/test_hash.c tests/test_index.c tests/test_object.c tests/test_tree.c
 
 OBJ = $(SRC:.c=.o)
 
