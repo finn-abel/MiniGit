@@ -93,16 +93,25 @@ static void read_text_file(const char *path, char **out) {
     *out = (char *)data;
 }
 
-static void commit_file(const char *contents, const char *message, char out_hash[MG_HASH_HEX_SIZE]) {
+static void commit_named_file(const char *path, const char *contents, const char *message, char out_hash[MG_HASH_HEX_SIZE]) {
     Repository repo;
-    char *add_args[] = {"file.txt"};
+    char parent_path[MG_MAX_PATH];
+    char *add_args[] = {(char *)path};
     char *commit_args[] = {"-m", (char *)message};
 
-    assert_result(fs_write_file("file.txt", (const unsigned char *)contents, strlen(contents)), MG_OK, "write file failed");
+    assert_result(fs_parent_dir(path, parent_path, sizeof(parent_path)), MG_OK, "parent path failed");
+    if (strcmp(parent_path, ".") != 0) {
+        assert_result(fs_mkdir_p(parent_path), MG_OK, "mkdir parent failed");
+    }
+    assert_result(fs_write_file(path, (const unsigned char *)contents, strlen(contents)), MG_OK, "write file failed");
     assert_result(mg_command_add(1, add_args), MG_OK, "add file failed");
     assert_result(mg_command_commit(2, commit_args), MG_OK, "commit file failed");
     assert_result(repo_open(&repo), MG_OK, "repo_open failed");
     assert_result(repo_current_commit(&repo, out_hash, MG_HASH_HEX_SIZE), MG_OK, "repo_current_commit failed");
+}
+
+static void commit_file(const char *contents, const char *message, char out_hash[MG_HASH_HEX_SIZE]) {
+    commit_named_file("file.txt", contents, message, out_hash);
 }
 
 static void test_detached_checkout_restores_commit(void) {
@@ -161,6 +170,85 @@ static void test_checkout_refuses_dirty_tracked_file(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_checkout_refuses_untracked_target_file(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char first_hash[MG_HASH_HEX_SIZE];
+    char second_hash[MG_HASH_HEX_SIZE];
+    char *checkout_first_args[] = {first_hash};
+    char *checkout_second_args[] = {second_hash};
+    char *file_contents;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_file("one\n", "one", first_hash);
+    commit_named_file("extra.txt", "committed\n", "add extra", second_hash);
+    assert_result(mg_command_checkout(1, checkout_first_args), MG_OK, "checkout first commit failed");
+    assert_result(fs_write_file("extra.txt", (const unsigned char *)"local\n", strlen("local\n")), MG_OK, "write untracked file failed");
+
+    assert_result(mg_command_checkout(1, checkout_second_args), MG_CONFLICT, "checkout should refuse untracked target file");
+    read_text_file("extra.txt", &file_contents);
+    assert_true(strcmp(file_contents, "local\n") == 0, "untracked file should be preserved");
+    free(file_contents);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_checkout_allows_clean_file_to_directory_transition(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char first_hash[MG_HASH_HEX_SIZE];
+    char second_hash[MG_HASH_HEX_SIZE];
+    char *checkout_first_args[] = {first_hash};
+    char *checkout_second_args[] = {second_hash};
+    char *rm_args[] = {"node"};
+    char *file_contents;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_named_file("node", "file\n", "file", first_hash);
+    assert_result(mg_command_rm(1, rm_args), MG_OK, "rm node failed");
+    commit_named_file("node/file.txt", "nested\n", "directory", second_hash);
+
+    assert_result(mg_command_checkout(1, checkout_first_args), MG_OK, "checkout file commit failed");
+    assert_true(fs_is_file("node"), "node should be restored as a file");
+    assert_result(mg_command_checkout(1, checkout_second_args), MG_OK, "checkout directory commit failed");
+    assert_true(fs_is_dir("node"), "node should become a directory");
+    read_text_file("node/file.txt", &file_contents);
+    assert_true(strcmp(file_contents, "nested\n") == 0, "nested file should be restored");
+    free(file_contents);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_checkout_allows_clean_directory_to_file_transition(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char first_hash[MG_HASH_HEX_SIZE];
+    char second_hash[MG_HASH_HEX_SIZE];
+    char *checkout_first_args[] = {first_hash};
+    char *checkout_second_args[] = {second_hash};
+    char *rm_args[] = {"node/file.txt"};
+    char *file_contents;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_named_file("node/file.txt", "nested\n", "directory", first_hash);
+    assert_result(mg_command_rm(1, rm_args), MG_OK, "rm nested file failed");
+    assert_true(rmdir("node") == 0, "remove empty node directory failed");
+    commit_named_file("node", "file\n", "file", second_hash);
+
+    assert_result(mg_command_checkout(1, checkout_first_args), MG_OK, "checkout directory commit failed");
+    assert_true(fs_is_dir("node"), "node should be restored as a directory");
+    assert_result(mg_command_checkout(1, checkout_second_args), MG_OK, "checkout file commit failed");
+    assert_true(fs_is_file("node"), "node should become a file");
+    read_text_file("node", &file_contents);
+    assert_true(strcmp(file_contents, "file\n") == 0, "file should be restored");
+    free(file_contents);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 static void test_switch_restores_branch_and_updates_head(void) {
     char original_dir[MG_MAX_PATH];
     char temp_dir[MG_MAX_PATH];
@@ -186,6 +274,40 @@ static void test_switch_restores_branch_and_updates_head(void) {
     assert_result(repo_open(&repo), MG_OK, "repo_open failed");
     assert_result(repo_read_head(&repo, head, sizeof(head)), MG_OK, "repo_read_head failed");
     assert_true(strcmp(head, "ref: refs/heads/feature") == 0, "HEAD should point to feature branch");
+
+    (void)first_hash;
+    (void)second_hash;
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_switch_refuses_untracked_target_file(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char first_hash[MG_HASH_HEX_SIZE];
+    char second_hash[MG_HASH_HEX_SIZE];
+    char head[MG_MAX_PATH];
+    char *branch_args[] = {"feature"};
+    char *switch_feature_args[] = {"feature"};
+    char *switch_main_args[] = {"main"};
+    char *file_contents;
+    Repository repo;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_file("one\n", "one", first_hash);
+    assert_result(mg_command_branch(1, branch_args), MG_OK, "branch feature failed");
+    commit_named_file("extra.txt", "committed\n", "add extra", second_hash);
+    assert_result(mg_command_switch(1, switch_feature_args), MG_OK, "switch feature failed");
+    assert_result(fs_write_file("extra.txt", (const unsigned char *)"local\n", strlen("local\n")), MG_OK, "write untracked file failed");
+
+    assert_result(mg_command_switch(1, switch_main_args), MG_CONFLICT, "switch should refuse untracked target file");
+    read_text_file("extra.txt", &file_contents);
+    assert_true(strcmp(file_contents, "local\n") == 0, "untracked file should be preserved");
+    free(file_contents);
+
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(repo_read_head(&repo, head, sizeof(head)), MG_OK, "repo_read_head failed");
+    assert_true(strcmp(head, "ref: refs/heads/feature") == 0, "failed switch should leave HEAD on feature");
 
     (void)first_hash;
     (void)second_hash;
@@ -313,7 +435,11 @@ static void test_checkout_path_missing_from_commit(void) {
 int main(void) {
     test_detached_checkout_restores_commit();
     test_checkout_refuses_dirty_tracked_file();
+    test_checkout_refuses_untracked_target_file();
+    test_checkout_allows_clean_file_to_directory_transition();
+    test_checkout_allows_clean_directory_to_file_transition();
     test_switch_restores_branch_and_updates_head();
+    test_switch_refuses_untracked_target_file();
     test_restore_path_from_head();
     test_restore_rejects_path_missing_from_head();
     test_checkout_path_from_commit();

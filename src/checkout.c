@@ -2,10 +2,12 @@
 
 #include "checkout.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "commit.h"
 #include "fs.h"
@@ -13,6 +15,16 @@
 #include "index.h"
 #include "object.h"
 #include "tree.h"
+
+/*
+ * DirectoryCollisionContext carries the target path being checked against an
+ * existing worktree directory at that same path.
+ */
+typedef struct {
+    const Index *index;
+    const Tree *target_tree;
+    const char *target_path;
+} DirectoryCollisionContext;
 
 /*
  * hash_working_file computes a blob object hash without storing an object.
@@ -74,6 +86,124 @@ static MGResult ensure_no_unstaged_changes(const Repository *repo, const Index *
     return MG_OK;
 }
 
+static int tracked_file_will_be_removed(const Index *index, const Tree *target_tree, const char *relative_path) {
+    return index_find_const(index, relative_path) != NULL && tree_find_entry(target_tree, relative_path) == NULL;
+}
+
+/*
+ * ensure_target_parent_dirs_clear refuses paths that cannot be created because
+ * an existing file occupies one of the target's parent directory positions.
+ */
+static MGResult ensure_target_parent_dirs_clear(
+    const Repository *repo,
+    const Index *index,
+    const Tree *target_tree,
+    const char *relative_path
+) {
+    char prefix[MG_MAX_PATH];
+    char full_path[MG_MAX_PATH];
+    size_t prefix_len = 0;
+
+    for (size_t i = 0; relative_path[i] != '\0'; i++) {
+        if (relative_path[i] != '/') {
+            if (prefix_len + 1 >= sizeof(prefix)) {
+                return MG_INVALID_ARG;
+            }
+            prefix[prefix_len++] = relative_path[i];
+            continue;
+        }
+
+        if (prefix_len == 0) {
+            return MG_INVALID_ARG;
+        }
+        prefix[prefix_len] = '\0';
+        if (fs_join_path(repo->worktree_path, prefix, full_path, sizeof(full_path)) != MG_OK) {
+            return MG_INVALID_ARG;
+        }
+        if (fs_exists(full_path) && !fs_is_dir(full_path)) {
+            if (!tracked_file_will_be_removed(index, target_tree, prefix)) {
+                return MG_CONFLICT;
+            }
+        }
+
+        if (prefix_len + 1 >= sizeof(prefix)) {
+            return MG_INVALID_ARG;
+        }
+        prefix[prefix_len++] = '/';
+    }
+
+    return MG_OK;
+}
+
+/*
+ * ensure_directory_collision_file_is_safe rejects untracked files inside an
+ * existing directory that the target tree wants to replace with a file.
+ */
+static MGResult ensure_directory_collision_file_is_safe(const char *walk_relative_path, void *ctx) {
+    DirectoryCollisionContext *context = ctx;
+    char relative_path[MG_MAX_PATH];
+
+    if (fs_join_path(context->target_path, walk_relative_path, relative_path, sizeof(relative_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    return tracked_file_will_be_removed(context->index, context->target_tree, relative_path) ? MG_OK : MG_CONFLICT;
+}
+
+/*
+ * ensure_target_path_clear refuses exact-path collisions, except when an
+ * existing directory contains only tracked files that this checkout will remove.
+ */
+static MGResult ensure_target_path_clear(
+    const Repository *repo,
+    const Index *index,
+    const Tree *target_tree,
+    const char *relative_path
+) {
+    char full_path[MG_MAX_PATH];
+    DirectoryCollisionContext context;
+
+    if (index_find_const(index, relative_path) != NULL) {
+        return MG_OK;
+    }
+    if (fs_join_path(repo->worktree_path, relative_path, full_path, sizeof(full_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (!fs_exists(full_path)) {
+        return MG_OK;
+    }
+    if (!fs_is_dir(full_path)) {
+        return MG_CONFLICT;
+    }
+
+    context.index = index;
+    context.target_tree = target_tree;
+    context.target_path = relative_path;
+    return fs_walk(full_path, ensure_directory_collision_file_is_safe, &context);
+}
+
+/*
+ * ensure_no_untracked_overwrites refuses to clobber files that are absent from
+ * the current index but would be written by the target commit.
+ */
+static MGResult ensure_no_untracked_overwrites(const Repository *repo, const Index *index, const Tree *target_tree) {
+    MGResult result;
+
+    for (size_t i = 0; i < target_tree->count; i++) {
+        const TreeEntry *entry = &target_tree->entries[i];
+
+        result = ensure_target_parent_dirs_clear(repo, index, target_tree, entry->path);
+        if (result != MG_OK) {
+            return result;
+        }
+        result = ensure_target_path_clear(repo, index, target_tree, entry->path);
+        if (result != MG_OK) {
+            return result;
+        }
+    }
+
+    return MG_OK;
+}
+
 /*
  * remove_files_absent_from_target deletes tracked files missing from target tree.
  */
@@ -90,6 +220,69 @@ static MGResult remove_files_absent_from_target(const Repository *repo, const In
         }
         if (fs_exists(full_path) && fs_is_file(full_path) && fs_remove_file(full_path) != MG_OK) {
             return MG_IO_ERROR;
+        }
+    }
+
+    return MG_OK;
+}
+
+/*
+ * remove_empty_dir_tree removes a directory that has already been proven not
+ * to contain untracked files. It leaves non-empty or unexpected entries as a
+ * conflict instead of forcing deletion.
+ */
+static MGResult remove_empty_dir_tree(const char *path) {
+    DIR *dir;
+    struct dirent *entry;
+    MGResult result = MG_OK;
+
+    dir = opendir(path);
+    if (dir == NULL) {
+        return MG_IO_ERROR;
+    }
+
+    while ((entry = readdir(dir)) != NULL && result == MG_OK) {
+        char child[MG_MAX_PATH];
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        if (fs_join_path(path, entry->d_name, child, sizeof(child)) != MG_OK) {
+            result = MG_INVALID_ARG;
+        } else if (fs_is_dir(child)) {
+            result = remove_empty_dir_tree(child);
+        } else if (fs_exists(child)) {
+            result = MG_CONFLICT;
+        }
+    }
+
+    if (closedir(dir) != 0 && result == MG_OK) {
+        result = MG_IO_ERROR;
+    }
+    if (result == MG_OK && rmdir(path) != 0) {
+        result = MG_IO_ERROR;
+    }
+    return result;
+}
+
+/*
+ * remove_directories_replaced_by_files clears directory shells after their
+ * tracked contents were removed, allowing clean dir-to-file checkouts.
+ */
+static MGResult remove_directories_replaced_by_files(const Repository *repo, const Tree *target_tree) {
+    char full_path[MG_MAX_PATH];
+    MGResult result;
+
+    for (size_t i = 0; i < target_tree->count; i++) {
+        if (fs_join_path(repo->worktree_path, target_tree->entries[i].path, full_path, sizeof(full_path)) != MG_OK) {
+            return MG_INVALID_ARG;
+        }
+        if (!fs_is_dir(full_path)) {
+            continue;
+        }
+        result = remove_empty_dir_tree(full_path);
+        if (result != MG_OK) {
+            return result;
         }
     }
 
@@ -195,7 +388,17 @@ MGResult checkout_commit(const Repository *repo, const char commit_hash[MG_HASH_
         return result;
     }
 
+    result = ensure_no_untracked_overwrites(repo, &current_index, &target_tree);
+    if (result != MG_OK) {
+        index_free(&current_index);
+        tree_free(&target_tree);
+        return result;
+    }
+
     result = remove_files_absent_from_target(repo, &current_index, &target_tree);
+    if (result == MG_OK) {
+        result = remove_directories_replaced_by_files(repo, &target_tree);
+    }
     if (result == MG_OK) {
         result = restore_tree(repo, &target_tree, &new_index);
     }
