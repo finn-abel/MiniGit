@@ -44,6 +44,11 @@ MGResult mg_command_log(int argc, char **argv);
 MGResult mg_command_show(int argc, char **argv);
 
 /*
+ * mg_command_pack handles `minigit pack`.
+ */
+MGResult mg_command_pack(int argc, char **argv);
+
+/*
  * mg_command_branch handles `minigit branch [name]`.
  */
 MGResult mg_command_branch(int argc, char **argv);

@@ -136,8 +136,10 @@ static void test_repo_required_commands(void) {
     make_temp_dir("commands_required", original_dir, temp_dir);
 
     assert_result(mg_command_status(0, NULL), MG_REPO_ERROR, "status should require a repo");
+    assert_result(mg_command_pack(0, NULL), MG_REPO_ERROR, "pack should require a repo");
     assert_result(mg_command_init(0, NULL), MG_OK, "init should create a repo");
     assert_result(mg_command_status(0, NULL), MG_OK, "status should open an initialized repo");
+    assert_result(mg_command_pack(0, NULL), MG_OK, "pack should work in initialized repo");
     assert_result(mg_command_init(0, NULL), MG_REPO_ERROR, "init should refuse existing repo");
 
     cleanup_temp_dir(original_dir, temp_dir);
@@ -159,6 +161,7 @@ static void test_command_validation_before_repo_open(void) {
     assert_result(mg_command_commit(0, NULL), MG_INVALID_ARG, "commit without message should fail before repo open");
     assert_result(mg_command_restore(0, NULL), MG_INVALID_ARG, "restore without path should fail before repo open");
     assert_result(mg_command_reset(0, NULL), MG_INVALID_ARG, "reset without path should fail before repo open");
+    assert_result(mg_command_pack(1, bad_checkout_args), MG_INVALID_ARG, "pack with args should fail before repo open");
     assert_result(mg_command_diff(1, bad_checkout_args), MG_INVALID_ARG, "bad diff mode should fail before repo open");
     assert_result(mg_command_branch(1, bad_branch_args), MG_INVALID_ARG, "bad branch should fail before repo open");
     assert_result(mg_command_merge(1, bad_branch_args), MG_INVALID_ARG, "bad merge branch should fail before repo open");

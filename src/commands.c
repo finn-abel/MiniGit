@@ -712,6 +712,35 @@ MGResult mg_command_show(int argc, char **argv) {
 }
 
 /*
+ * mg_command_pack handles `minigit pack`.
+ */
+MGResult mg_command_pack(int argc, char **argv) {
+    Repository repo;
+    size_t count = 0;
+    MGResult result;
+
+    if (argc != 0) {
+        ignore_args(argc, argv);
+        puts("usage: minigit pack");
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = object_pack_all(&repo, &count);
+    if (result != MG_OK) {
+        puts("failed to pack objects");
+        return result;
+    }
+
+    printf("packed %zu objects\n", count);
+    return MG_OK;
+}
+
+/*
  * mg_command_branch handles `minigit branch [name]` and `minigit branch -d <name>`.
  */
 MGResult mg_command_branch(int argc, char **argv) {

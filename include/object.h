@@ -37,6 +37,11 @@ MGResult object_read(const Repository *repo, const char *hash, Object *out_objec
 MGResult object_resolve_prefix(const Repository *repo, const char *prefix, char out_hash[MG_HASH_HEX_SIZE]);
 
 /*
+ * object_pack_all writes a simple MiniGit packfile containing loose objects.
+ */
+MGResult object_pack_all(const Repository *repo, size_t *out_count);
+
+/*
  * object_free releases payload memory held by an Object.
  */
 void object_free(Object *object);

@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Werror -std=c11 -g
 INCLUDES = -Iinclude
 LDFLAGS =
-LDLIBS = -lcrypto
+LDLIBS = -lcrypto -lz
 OPENSSL_PREFIX ?= $(firstword $(wildcard /opt/homebrew/opt/openssl@3 /opt/homebrew/opt/openssl /usr/local/opt/openssl@3 /usr/local/opt/openssl))
 
 ifneq ($(OPENSSL_PREFIX),)

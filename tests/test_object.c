@@ -42,6 +42,16 @@ static void remove_initialized_repo(void) {
     (void)rmdir(".minigit");
 }
 
+static void object_file_path_for_hash(const char *hash, char object_dir_path[MG_MAX_PATH], char object_path[MG_MAX_PATH]) {
+    char fanout_dir[3];
+
+    fanout_dir[0] = hash[0];
+    fanout_dir[1] = hash[1];
+    fanout_dir[2] = '\0';
+    assert_ok(fs_join_path(".minigit/objects", fanout_dir, object_dir_path, MG_MAX_PATH), "object dir path failed");
+    assert_ok(fs_join_path(object_dir_path, hash + 2, object_path, MG_MAX_PATH), "object path failed");
+}
+
 static void make_temp_repo(Repository *repo, char original_dir[MG_MAX_PATH], char temp_dir[MG_MAX_PATH]) {
     int written;
 
@@ -82,9 +92,10 @@ static void test_write_read_blob_object(void) {
     char original_dir[MG_MAX_PATH];
     char temp_dir[MG_MAX_PATH];
     char hash[MG_HASH_HEX_SIZE];
-    char fanout_dir[3];
     char object_dir_path[MG_MAX_PATH];
     char object_path[MG_MAX_PATH];
+    unsigned char *stored = NULL;
+    size_t stored_size = 0;
     const unsigned char payload[] = "hello world";
 
     make_temp_repo(&repo, original_dir, temp_dir);
@@ -92,12 +103,11 @@ static void test_write_read_blob_object(void) {
     assert_ok(object_write(&repo, "blob", payload, strlen((const char *)payload), hash), "object_write failed");
     assert_true(hash_is_valid_hex(hash), "object_write returned invalid hash");
 
-    fanout_dir[0] = hash[0];
-    fanout_dir[1] = hash[1];
-    fanout_dir[2] = '\0';
-    assert_ok(fs_join_path(".minigit/objects", fanout_dir, object_dir_path, sizeof(object_dir_path)), "object dir path failed");
-    assert_ok(fs_join_path(object_dir_path, hash + 2, object_path, sizeof(object_path)), "object path failed");
+    object_file_path_for_hash(hash, object_dir_path, object_path);
     assert_true(fs_is_file(object_path), "object file was not written under .minigit/objects");
+    assert_ok(fs_read_file(object_path, &stored, &stored_size), "read stored object failed");
+    assert_true(stored_size > 4 && memcmp(stored, "MGZ1", 4) == 0, "loose object should be zlib wrapped");
+    free(stored);
 
     assert_ok(object_read(&repo, hash, &object), "object_read failed");
     assert_true(strcmp(object.type, "blob") == 0, "object type mismatch");
@@ -109,6 +119,48 @@ static void test_write_read_blob_object(void) {
 
     assert_ok(fs_remove_file(object_path), "object cleanup failed");
     assert_true(rmdir(object_dir_path) == 0, "object dir cleanup failed");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
+static void test_packfile_reads_after_loose_removal(void) {
+    Repository repo;
+    Object object;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char first_hash[MG_HASH_HEX_SIZE];
+    char second_hash[MG_HASH_HEX_SIZE];
+    char resolved[MG_HASH_HEX_SIZE];
+    char object_dir_path[MG_MAX_PATH];
+    char object_path[MG_MAX_PATH];
+    size_t packed_count = 0;
+    const unsigned char first[] = "first packed";
+    const unsigned char second[] = "second packed";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    assert_ok(object_write(&repo, "blob", first, strlen((const char *)first), first_hash), "first object_write failed");
+    assert_ok(object_write(&repo, "blob", second, strlen((const char *)second), second_hash), "second object_write failed");
+    assert_ok(object_pack_all(&repo, &packed_count), "object_pack_all failed");
+    assert_true(packed_count == 2, "pack should include both loose objects");
+    assert_true(fs_is_file(".minigit/objects/pack/minigit.pack"), "packfile should exist");
+
+    object_file_path_for_hash(first_hash, object_dir_path, object_path);
+    assert_ok(fs_remove_file(object_path), "remove first loose object failed");
+    assert_ok(object_read(&repo, first_hash, &object), "object_read should fall back to pack");
+    assert_true(strcmp(object.type, "blob") == 0, "packed object type mismatch");
+    assert_true(object.size == strlen((const char *)first), "packed object size mismatch");
+    assert_true(memcmp(object.payload, first, object.size) == 0, "packed object payload mismatch");
+    object_free(&object);
+
+    assert_ok(object_resolve_prefix(&repo, first_hash, resolved), "packed full hash should resolve");
+    assert_true(strcmp(resolved, first_hash) == 0, "packed hash resolution mismatch");
+
+    object_file_path_for_hash(second_hash, object_dir_path, object_path);
+    assert_ok(fs_remove_file(object_path), "remove second loose object failed");
+    assert_true(rmdir(object_dir_path) == 0, "second object dir cleanup failed");
+    object_file_path_for_hash(first_hash, object_dir_path, object_path);
+    assert_true(rmdir(object_dir_path) == 0, "first object dir cleanup failed");
+    assert_ok(fs_remove_file(".minigit/objects/pack/minigit.pack"), "remove packfile failed");
+    assert_true(rmdir(".minigit/objects/pack") == 0, "pack dir cleanup failed");
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
@@ -196,6 +248,7 @@ static void test_resolve_ambiguous_object_prefix(void) {
 
 int main(void) {
     test_write_read_blob_object();
+    test_packfile_reads_after_loose_removal();
     test_resolve_unique_object_prefix();
     test_resolve_ambiguous_object_prefix();
     puts("test_object passed");
