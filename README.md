@@ -1,6 +1,6 @@
-# MiniGit-C
+# MiniGit
 
-MiniGit-C is a small educational version control system written in C11. It
+MiniGit is a small educational version control system written in C11. It
 implements a local-only subset of Git so the core pieces of a VCS are visible in
 plain C: repository metadata, an index, content-addressed objects, commits,
 status, diffs, checkout, branches, and simple merges.
