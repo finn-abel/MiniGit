@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "commit.h"
 #include "fs.h"
@@ -20,6 +21,7 @@ typedef enum {
     CHANGE_ADDED,
     CHANGE_MODIFIED,
     CHANGE_DELETED,
+    CHANGE_RENAMED,
     CHANGE_UNTRACKED
 } ChangeKind;
 
@@ -29,6 +31,7 @@ typedef enum {
 typedef struct {
     ChangeKind kind;
     char path[MG_MAX_PATH];
+    char old_path[MG_MAX_PATH];
 } Change;
 
 /*
@@ -60,6 +63,8 @@ static const char *change_label(ChangeKind kind) {
             return "modified";
         case CHANGE_DELETED:
             return "deleted";
+        case CHANGE_RENAMED:
+            return "renamed";
         case CHANGE_UNTRACKED:
             return "";
     }
@@ -67,7 +72,7 @@ static const char *change_label(ChangeKind kind) {
 }
 
 /*
- * compare_changes keeps output sorted by path.
+ * compare_changes keeps output sorted by visible destination path.
  */
 static int compare_changes(const void *left, const void *right) {
     const Change *a = left;
@@ -107,8 +112,32 @@ static MGResult change_list_add(ChangeList *list, ChangeKind kind, const char *p
 
     list->items[list->count].kind = kind;
     strcpy(list->items[list->count].path, path);
+    list->items[list->count].old_path[0] = '\0';
     list->count++;
     return MG_OK;
+}
+
+static MGResult change_list_add_rename(ChangeList *list, const char *old_path, const char *new_path) {
+    MGResult result;
+
+    if (old_path == NULL || old_path[0] == '\0' || strlen(old_path) >= MG_MAX_PATH) {
+        return MG_INVALID_ARG;
+    }
+    result = change_list_add(list, CHANGE_RENAMED, new_path);
+    if (result != MG_OK) {
+        return result;
+    }
+    strcpy(list->items[list->count - 1].old_path, old_path);
+    return MG_OK;
+}
+
+static int change_list_has_rename_from(const ChangeList *list, const char *old_path) {
+    for (size_t i = 0; i < list->count; i++) {
+        if (list->items[i].kind == CHANGE_RENAMED && strcmp(list->items[i].old_path, old_path) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /*
@@ -147,6 +176,10 @@ static const TreeEntry *tree_find(const Tree *tree, const char *path) {
         }
     }
     return NULL;
+}
+
+static unsigned int mode_from_stat(const struct stat *st) {
+    return (st->st_mode & S_IXUSR) ? 0100755 : 0100644;
 }
 
 /*
@@ -244,8 +277,23 @@ static MGResult compare_head_to_index(const Tree *head_tree, const Index *index,
         index_entry = &index->entries[i];
         head_entry = tree_find(head_tree, index_entry->path);
         if (head_entry == NULL) {
-            result = change_list_add(staged, CHANGE_ADDED, index_entry->path);
-        } else if (strcmp(head_entry->hash, index_entry->hash) != 0) {
+            int renamed = 0;
+            result = MG_OK;
+            for (size_t j = 0; j < head_tree->count; j++) {
+                const TreeEntry *candidate = &head_tree->entries[j];
+                if (index_find_const(index, candidate->path) == NULL &&
+                    !change_list_has_rename_from(staged, candidate->path) &&
+                    strcmp(candidate->hash, index_entry->hash) == 0 &&
+                    candidate->mode == index_entry->mode) {
+                    result = change_list_add_rename(staged, candidate->path, index_entry->path);
+                    renamed = 1;
+                    break;
+                }
+            }
+            if (result == MG_OK && !renamed) {
+                result = change_list_add(staged, CHANGE_ADDED, index_entry->path);
+            }
+        } else if (strcmp(head_entry->hash, index_entry->hash) != 0 || head_entry->mode != index_entry->mode) {
             result = change_list_add(staged, CHANGE_MODIFIED, index_entry->path);
         } else {
             result = MG_OK;
@@ -258,6 +306,9 @@ static MGResult compare_head_to_index(const Tree *head_tree, const Index *index,
     for (size_t i = 0; i < head_tree->count; i++) {
         head_entry = &head_tree->entries[i];
         if (index_find_const(index, head_entry->path) == NULL) {
+            if (change_list_has_rename_from(staged, head_entry->path)) {
+                continue;
+            }
             result = change_list_add(staged, CHANGE_DELETED, head_entry->path);
             if (result != MG_OK) {
                 return result;
@@ -286,11 +337,15 @@ static MGResult compare_index_to_worktree(const Repository *repo, const Index *i
         } else if (!fs_is_file(full_path)) {
             result = change_list_add(unstaged, CHANGE_MODIFIED, entry->path);
         } else {
+            struct stat st;
+            if (lstat(full_path, &st) != 0) {
+                return MG_IO_ERROR;
+            }
             result = hash_working_file(repo, entry->path, working_hash);
             if (result != MG_OK) {
                 return result;
             }
-            result = strcmp(working_hash, entry->hash) == 0
+            result = strcmp(working_hash, entry->hash) == 0 && mode_from_stat(&st) == entry->mode
                 ? MG_OK
                 : change_list_add(unstaged, CHANGE_MODIFIED, entry->path);
         }
@@ -326,7 +381,11 @@ static void print_labeled_section(const char *title, const ChangeList *list) {
 
     printf("%s:\n", title);
     for (size_t i = 0; i < list->count; i++) {
-        printf("  %s: %s\n", change_label(list->items[i].kind), list->items[i].path);
+        if (list->items[i].kind == CHANGE_RENAMED) {
+            printf("  %s: %s -> %s\n", change_label(list->items[i].kind), list->items[i].old_path, list->items[i].path);
+        } else {
+            printf("  %s: %s\n", change_label(list->items[i].kind), list->items[i].path);
+        }
     }
 }
 

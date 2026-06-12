@@ -168,8 +168,40 @@ static void test_diff_modes(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_diff_mode_change(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"script.sh"};
+    char *commit_args[] = {"-m", "script"};
+    char *staged_args[] = {"--staged"};
+    char *output;
+
+    make_temp_dir("diff_mode", original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("script.sh", (const unsigned char *)"#!/bin/sh\n", 10), MG_OK, "write script failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "add failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit failed");
+    assert_result(chmod("script.sh", 0755) == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "chmod failed");
+
+    output = capture_diff(0, NULL);
+    assert_contains(output, "diff --minigit script.sh\n", "mode diff should name path");
+    assert_contains(output, "old mode 100644\n", "mode diff should show old mode");
+    assert_contains(output, "new mode 100755\n", "mode diff should show new mode");
+    free(output);
+
+    assert_result(mg_command_add(1, add_args), MG_OK, "stage mode failed");
+    output = capture_diff(1, staged_args);
+    assert_contains(output, "old mode 100644\n", "staged mode diff should show old mode");
+    assert_contains(output, "new mode 100755\n", "staged mode diff should show new mode");
+    free(output);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_diff_modes();
+    test_diff_mode_change();
     puts("All diff tests passed.");
     return 0;
 }

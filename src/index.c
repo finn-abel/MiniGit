@@ -115,6 +115,25 @@ static MGResult parse_mtime_field(const char *value, time_t *out) {
     return MG_OK;
 }
 
+static int mode_is_supported(unsigned int mode) {
+    return mode == 0100644 || mode == 0100755;
+}
+
+static MGResult parse_mode_field(const char *value, unsigned int *out) {
+    if (value == NULL || out == NULL) {
+        return MG_PARSE_ERROR;
+    }
+    if (strcmp(value, "100644") == 0) {
+        *out = 0100644;
+        return MG_OK;
+    }
+    if (strcmp(value, "100755") == 0) {
+        *out = 0100755;
+        return MG_OK;
+    }
+    return MG_PARSE_ERROR;
+}
+
 /*
  * parse_index_line validates and loads one tab-separated index line.
  * The path field is last so paths may contain spaces, but not tabs/newlines.
@@ -126,6 +145,7 @@ static MGResult parse_index_line(Index *index, char *line) {
     char *mtime_text;
     char *path;
     char *extra;
+    unsigned int parsed_mode;
     size_t size;
     time_t mtime;
 
@@ -141,7 +161,7 @@ static MGResult parse_index_line(Index *index, char *line) {
         path == NULL || extra != NULL) {
         return MG_PARSE_ERROR;
     }
-    if (strcmp(mode, "100644") != 0 || !hash_is_valid_hex(hash)) {
+    if (parse_mode_field(mode, &parsed_mode) != MG_OK || !hash_is_valid_hex(hash)) {
         return MG_PARSE_ERROR;
     }
     if (path[0] == '\0' || strchr(path, '\n') != NULL) {
@@ -151,7 +171,7 @@ static MGResult parse_index_line(Index *index, char *line) {
         return MG_PARSE_ERROR;
     }
 
-    return index_add_or_update(index, path, hash, size, mtime);
+    return index_add_or_update(index, path, hash, parsed_mode, size, mtime);
 }
 
 /*
@@ -267,7 +287,8 @@ MGResult index_save(const Repository *repo, const Index *index) {
         int line_size = snprintf(
             NULL,
             0,
-            "100644\t%s\t%zu\t%ld\t%s\n",
+            "%06o\t%s\t%zu\t%ld\t%s\n",
+            index->entries[i].mode,
             index->entries[i].hash,
             index->entries[i].size,
             (long)index->entries[i].mtime,
@@ -289,7 +310,8 @@ MGResult index_save(const Repository *repo, const Index *index) {
         int written = snprintf(
             (char *)data + offset,
             total_size + 1 - offset,
-            "100644\t%s\t%zu\t%ld\t%s\n",
+            "%06o\t%s\t%zu\t%ld\t%s\n",
+            index->entries[i].mode,
             index->entries[i].hash,
             index->entries[i].size,
             (long)index->entries[i].mtime,
@@ -312,12 +334,19 @@ MGResult index_save(const Repository *repo, const Index *index) {
  * index_add_or_update is the only mutation path for staged file metadata.
  * Re-adding an existing path replaces the whole entry instead of duplicating it.
  */
-MGResult index_add_or_update(Index *index, const char *path, const char *hash, size_t size, time_t mtime) {
+MGResult index_add_or_update(
+    Index *index,
+    const char *path,
+    const char *hash,
+    unsigned int mode,
+    size_t size,
+    time_t mtime
+) {
     IndexEntry *existing;
     IndexEntry entry;
 
     if (index == NULL || path == NULL || hash == NULL || path[0] == '\0' ||
-        strlen(path) >= sizeof(entry.path) || !hash_is_valid_hex(hash)) {
+        strlen(path) >= sizeof(entry.path) || !hash_is_valid_hex(hash) || !mode_is_supported(mode)) {
         return MG_INVALID_ARG;
     }
 
@@ -326,6 +355,7 @@ MGResult index_add_or_update(Index *index, const char *path, const char *hash, s
     memset(&entry, 0, sizeof(entry));
     strcpy(entry.path, path);
     strcpy(entry.hash, hash);
+    entry.mode = mode;
     entry.size = size;
     entry.mtime = mtime;
 

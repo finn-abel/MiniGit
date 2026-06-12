@@ -100,7 +100,7 @@ static void write_sample_tree(const Repository *repo, char tree_hash[MG_HASH_HEX
 
     assert_ok(object_write(repo, "blob", payload, strlen((const char *)payload), blob_hash), "blob write failed");
     index_init(&index);
-    assert_ok(index_add_or_update(&index, "README.md", blob_hash, strlen((const char *)payload), 1), "index add failed");
+    assert_ok(index_add_or_update(&index, "README.md", blob_hash, 0100644, strlen((const char *)payload), 1), "index add failed");
     assert_ok(tree_from_index(&index, &tree), "tree_from_index failed");
     assert_ok(tree_write(repo, &tree, tree_hash), "tree_write failed");
     tree_free(&tree);

@@ -101,6 +101,7 @@ MGResult reset_path(const Repository *repo, const char *relative_path) {
             &index,
             head_entry->path,
             head_entry->hash,
+            head_entry->mode,
             head_entry->size,
             current_mtime(repo, relative_path)
         );

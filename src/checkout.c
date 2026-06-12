@@ -79,12 +79,17 @@ static MGResult ensure_no_unstaged_changes(const Repository *repo, const Index *
         if (!fs_is_file(full_path)) {
             return MG_CONFLICT;
         }
+        struct stat st;
+        if (lstat(full_path, &st) != 0) {
+            return MG_IO_ERROR;
+        }
 
         result = hash_working_file(repo, entry->path, working_hash);
         if (result != MG_OK) {
             return result;
         }
-        if (strcmp(working_hash, entry->hash) != 0) {
+        if (strcmp(working_hash, entry->hash) != 0 ||
+            (((st.st_mode & S_IXUSR) ? 0100755 : 0100644) != entry->mode)) {
             return MG_CONFLICT;
         }
     }
@@ -148,11 +153,14 @@ static MGResult restore_blob(const Repository *repo, const TreeEntry *entry, Ind
     if (result != MG_OK) {
         return result;
     }
+    if (chmod(full_path, entry->mode == 0100755 ? 0755 : 0644) != 0) {
+        return MG_IO_ERROR;
+    }
     if (lstat(full_path, &st) != 0) {
         return MG_IO_ERROR;
     }
 
-    return index_add_or_update(new_index, entry->path, entry->hash, entry->size, st.st_mtime);
+    return index_add_or_update(new_index, entry->path, entry->hash, entry->mode, entry->size, st.st_mtime);
 }
 
 /*

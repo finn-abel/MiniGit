@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "commit.h"
 #include "fs.h"
@@ -19,6 +20,7 @@
 typedef struct {
     unsigned char *data;
     size_t size;
+    unsigned int mode;
     int exists;
 } FileContent;
 
@@ -54,6 +56,7 @@ typedef struct {
 static void file_content_init(FileContent *content) {
     content->data = NULL;
     content->size = 0;
+    content->mode = 0;
     content->exists = 0;
 }
 
@@ -92,7 +95,7 @@ static MGResult copy_bytes(const unsigned char *data, size_t size, FileContent *
 /*
  * read_blob_content loads a stored blob object as one side of a diff.
  */
-static MGResult read_blob_content(const Repository *repo, const char *hash, FileContent *out) {
+static MGResult read_blob_content(const Repository *repo, const char *hash, unsigned int mode, FileContent *out) {
     Object object;
     MGResult result;
 
@@ -111,6 +114,9 @@ static MGResult read_blob_content(const Repository *repo, const char *hash, File
     }
 
     result = copy_bytes(object.payload, object.size, out);
+    if (result == MG_OK) {
+        out->mode = mode;
+    }
     object_free(&object);
     return result;
 }
@@ -141,6 +147,12 @@ static MGResult read_worktree_content(const Repository *repo, const char *path, 
 
     result = fs_read_file(full_path, &out->data, &out->size);
     if (result == MG_OK) {
+        struct stat st;
+        if (lstat(full_path, &st) != 0) {
+            file_content_free(out);
+            return MG_IO_ERROR;
+        }
+        out->mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
         out->exists = 1;
     }
     return result;
@@ -296,13 +308,26 @@ static MGResult collect_paths(const Tree *head_tree, const Index *index, DiffMod
  * content_equal compares file existence and raw bytes before doing line work.
  */
 static int content_equal(const FileContent *left, const FileContent *right) {
-    if (left->exists != right->exists || left->size != right->size) {
+    if (left->exists != right->exists || left->mode != right->mode || left->size != right->size) {
         return 0;
     }
     if (!left->exists) {
         return 1;
     }
     return left->size == 0 || memcmp(left->data, right->data, left->size) == 0;
+}
+
+static int content_bytes_equal(const FileContent *left, const FileContent *right) {
+    if (!left->exists || !right->exists || left->size != right->size) {
+        return 0;
+    }
+    return left->size == 0 || memcmp(left->data, right->data, left->size) == 0;
+}
+
+static void print_mode_diff(const char *path, const FileContent *old_content, const FileContent *new_content) {
+    printf("diff --minigit %s\n", path);
+    printf("old mode %06o\n", old_content->mode);
+    printf("new mode %06o\n", new_content->mode);
 }
 
 /*
@@ -508,20 +533,20 @@ static MGResult load_side_content(
         if (index_entry == NULL) {
             return MG_OK;
         }
-        result = read_blob_content(repo, index_entry->hash, old_content);
+        result = read_blob_content(repo, index_entry->hash, index_entry->mode, old_content);
         if (result == MG_OK) {
             result = read_worktree_content(repo, path, new_content);
         }
     } else if (mode == DIFF_STAGED) {
         if (tree_entry != NULL) {
-            result = read_blob_content(repo, tree_entry->hash, old_content);
+            result = read_blob_content(repo, tree_entry->hash, tree_entry->mode, old_content);
         }
         if (result == MG_OK && index_entry != NULL) {
-            result = read_blob_content(repo, index_entry->hash, new_content);
+            result = read_blob_content(repo, index_entry->hash, index_entry->mode, new_content);
         }
     } else {
         if (tree_entry != NULL) {
-            result = read_blob_content(repo, tree_entry->hash, old_content);
+            result = read_blob_content(repo, tree_entry->hash, tree_entry->mode, old_content);
         }
         if (result == MG_OK) {
             result = read_worktree_content(repo, path, new_content);
@@ -579,7 +604,9 @@ MGResult diff_print(const Repository *repo, DiffMode mode) {
         }
 
         if (!content_equal(&old_content, &new_content)) {
-            if (content_is_binary(&old_content) || content_is_binary(&new_content)) {
+            if (old_content.mode != new_content.mode && content_bytes_equal(&old_content, &new_content)) {
+                print_mode_diff(paths.items[i], &old_content, &new_content);
+            } else if (content_is_binary(&old_content) || content_is_binary(&new_content)) {
                 printf("diff --minigit %s\n", paths.items[i]);
                 puts("Binary files differ");
             } else {

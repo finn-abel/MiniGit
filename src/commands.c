@@ -78,7 +78,14 @@ static MGResult stage_file(const Repository *repo, Index *index, const char *rel
         return result;
     }
 
-    result = index_add_or_update(index, relative_path, hash, (size_t)st.st_size, st.st_mtime);
+    result = index_add_or_update(
+        index,
+        relative_path,
+        hash,
+        (st.st_mode & S_IXUSR) ? 0100755 : 0100644,
+        (size_t)st.st_size,
+        st.st_mtime
+    );
     if (result == MG_OK) {
         printf("added %s\n", relative_path);
     }
@@ -325,7 +332,7 @@ static MGResult print_commit_show(const Repository *repo, const char *hash, cons
     printf("    %s\n\n", commit->message);
     puts("Files:");
     for (size_t i = 0; i < tree.count; i++) {
-        printf("  100644 blob %s %zu\t%s\n", tree.entries[i].hash, tree.entries[i].size, tree.entries[i].path);
+        printf("  %06o blob %s %zu\t%s\n", tree.entries[i].mode, tree.entries[i].hash, tree.entries[i].size, tree.entries[i].path);
     }
 
     tree_free(&tree);

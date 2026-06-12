@@ -13,6 +13,7 @@
 typedef struct {
     char path[MG_MAX_PATH];
     char hash[MG_HASH_HEX_SIZE];
+    unsigned int mode;
     size_t size;
     time_t mtime;
 } IndexEntry;
@@ -44,7 +45,14 @@ MGResult index_save(const Repository *repo, const Index *index);
 /*
  * index_add_or_update inserts or replaces an entry for path.
  */
-MGResult index_add_or_update(Index *index, const char *path, const char *hash, size_t size, time_t mtime);
+MGResult index_add_or_update(
+    Index *index,
+    const char *path,
+    const char *hash,
+    unsigned int mode,
+    size_t size,
+    time_t mtime
+);
 
 /*
  * index_remove deletes the entry for path if it exists.

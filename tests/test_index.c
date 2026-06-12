@@ -102,9 +102,9 @@ static void test_save_load_update_remove(void) {
     make_temp_repo(&repo, original_dir, temp_dir);
 
     index_init(&index);
-    assert_ok(index_add_or_update(&index, "z.txt", hash_b, 2, 20), "add z.txt failed");
-    assert_ok(index_add_or_update(&index, "a.txt", hash_a, 1, 10), "add a.txt failed");
-    assert_ok(index_add_or_update(&index, "z.txt", hash_c, 3, 30), "update z.txt failed");
+    assert_ok(index_add_or_update(&index, "z.txt", hash_b, 0100644, 2, 20), "add z.txt failed");
+    assert_ok(index_add_or_update(&index, "a.txt", hash_a, 0100644, 1, 10), "add a.txt failed");
+    assert_ok(index_add_or_update(&index, "z.txt", hash_c, 0100755, 3, 30), "update z.txt failed");
     assert_ok(index_save(&repo, &index), "index_save failed");
     index_free(&index);
 
@@ -117,6 +117,7 @@ static void test_save_load_update_remove(void) {
     assert_true(entry != NULL, "updated entry should exist");
     assert_true(index_find_const(&loaded, "z.txt") == entry, "const find should return the same entry");
     assert_true(strcmp(entry->hash, hash_c) == 0, "updated hash mismatch");
+    assert_true(entry->mode == 0100755, "updated mode mismatch");
     assert_true(entry->size == 3, "updated size mismatch");
     assert_true((long)entry->mtime == 30, "updated mtime mismatch");
 

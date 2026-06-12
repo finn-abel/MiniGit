@@ -263,6 +263,51 @@ static void test_status_respects_minigitignore(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_status_detects_staged_rename(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_old_args[] = {"old.txt"};
+    char *add_new_args[] = {"new.txt"};
+    char *rm_old_args[] = {"old.txt"};
+    char *commit_args[] = {"-m", "track old"};
+    const unsigned char contents[] = "same\n";
+
+    make_temp_dir(original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("old.txt", contents, sizeof(contents) - 1), MG_OK, "write old failed");
+    assert_result(mg_command_add(1, add_old_args), MG_OK, "add old failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit old failed");
+    assert_result(rename("old.txt", "new.txt") == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "rename failed");
+    assert_result(mg_command_add(1, add_new_args), MG_OK, "add new failed");
+    assert_result(mg_command_rm(1, rm_old_args), MG_OK, "rm old failed");
+    assert_status_equals("Changes to be committed:\n  renamed: old.txt -> new.txt\n");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_status_tracks_mode_changes(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"script.sh"};
+    char *commit_args[] = {"-m", "track script"};
+    const unsigned char contents[] = "#!/bin/sh\n";
+
+    make_temp_dir(original_dir, temp_dir);
+
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("script.sh", contents, sizeof(contents) - 1), MG_OK, "write script failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "add script failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit script failed");
+    assert_result(chmod("script.sh", 0755) == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "chmod executable failed");
+    assert_status_equals("Changes not staged for commit:\n  modified: script.sh\n");
+
+    assert_result(mg_command_add(1, add_args), MG_OK, "stage mode change failed");
+    assert_status_equals("Changes to be committed:\n  modified: script.sh\n");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_status_lifecycle();
     test_rm_stages_deletion();
@@ -271,6 +316,8 @@ int main(void) {
     test_status_staged_modification();
     test_status_sorted_untracked_files();
     test_status_respects_minigitignore();
+    test_status_detects_staged_rename();
+    test_status_tracks_mode_changes();
     puts("test_status passed");
     return 0;
 }

@@ -13,6 +13,7 @@
 typedef struct {
     char path[MG_MAX_PATH];
     char hash[MG_HASH_HEX_SIZE];
+    unsigned int mode;
     size_t size;
 } TreeEntry;
 

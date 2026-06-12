@@ -174,13 +174,13 @@ static void path_list_free(PathList *list) {
 }
 
 /*
- * tree_entry_same treats two absent entries as equal and otherwise compares blob hashes.
+ * tree_entry_same treats two absent entries as equal and otherwise compares blob hashes and modes.
  */
 static int tree_entry_same(const TreeEntry *left, const TreeEntry *right) {
     if (left == NULL || right == NULL) {
         return left == right;
     }
-    return strcmp(left->hash, right->hash) == 0;
+    return strcmp(left->hash, right->hash) == 0 && left->mode == right->mode;
 }
 
 /*
@@ -374,11 +374,16 @@ static MGResult ensure_clean_worktree(const Repository *repo, const Tree *head_t
         if (!fs_is_file(full_path)) {
             return MG_CONFLICT;
         }
+        struct stat st;
+        if (lstat(full_path, &st) != 0) {
+            return MG_IO_ERROR;
+        }
         result = blob_hash_from_file(repo, entry->path, working_hash);
         if (result != MG_OK) {
             return result;
         }
-        if (strcmp(working_hash, entry->hash) != 0) {
+        if (strcmp(working_hash, entry->hash) != 0 ||
+            (((st.st_mode & S_IXUSR) ? 0100755 : 0100644) != entry->mode)) {
             return MG_CONFLICT;
         }
     }
@@ -470,7 +475,10 @@ static MGResult apply_tree_entry(const Repository *repo, Index *index, const Tre
     if (lstat(full_path, &st) != 0) {
         return MG_IO_ERROR;
     }
-    return index_add_or_update(index, entry->path, entry->hash, entry->size, st.st_mtime);
+    if (chmod(full_path, entry->mode == 0100755 ? 0755 : 0644) != 0) {
+        return MG_IO_ERROR;
+    }
+    return index_add_or_update(index, entry->path, entry->hash, entry->mode, entry->size, st.st_mtime);
 }
 
 /*

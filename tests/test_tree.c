@@ -110,8 +110,8 @@ static void test_tree_write_read_roundtrip(void) {
     assert_ok(object_write(&repo, "blob", payload_a, strlen((const char *)payload_a), hash_a), "blob a write failed");
 
     index_init(&index);
-    assert_ok(index_add_or_update(&index, "z.txt", hash_b, strlen((const char *)payload_b), 20), "index add z failed");
-    assert_ok(index_add_or_update(&index, "a.txt", hash_a, strlen((const char *)payload_a), 10), "index add a failed");
+    assert_ok(index_add_or_update(&index, "z.txt", hash_b, 0100755, strlen((const char *)payload_b), 20), "index add z failed");
+    assert_ok(index_add_or_update(&index, "a.txt", hash_a, 0100644, strlen((const char *)payload_a), 10), "index add a failed");
 
     assert_ok(tree_from_index(&index, &tree), "tree_from_index failed");
     assert_true(tree.count == 2, "tree should contain two entries");
@@ -125,6 +125,7 @@ static void test_tree_write_read_roundtrip(void) {
     assert_true(loaded.count == 2, "loaded tree should contain two entries");
     assert_true(strcmp(loaded.entries[0].path, "a.txt") == 0, "loaded tree path mismatch");
     assert_true(strcmp(loaded.entries[0].hash, hash_a) == 0, "loaded tree hash mismatch");
+    assert_true(loaded.entries[1].mode == 0100755, "loaded tree mode mismatch");
     assert_true(loaded.entries[0].size == strlen((const char *)payload_a), "loaded tree size mismatch");
     assert_true(strcmp(loaded.entries[1].path, "z.txt") == 0, "loaded tree path mismatch");
 

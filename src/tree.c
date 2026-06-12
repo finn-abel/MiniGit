@@ -74,18 +74,23 @@ static MGResult ensure_capacity(Tree *tree, size_t needed) {
  * Hash validation happens here so both index conversion and object parsing
  * share the same entry-level guard.
  */
-static MGResult append_entry(Tree *tree, const char *path, const char *hash, size_t size) {
+static int mode_is_supported(unsigned int mode) {
+    return mode == 0100644 || mode == 0100755;
+}
+
+static MGResult append_entry(Tree *tree, const char *path, const char *hash, unsigned int mode, size_t size) {
     TreeEntry entry;
     MGResult result;
 
     if (tree == NULL || path == NULL || hash == NULL || path[0] == '\0' ||
-        strlen(path) >= sizeof(entry.path) || !hash_is_valid_hex(hash)) {
+        strlen(path) >= sizeof(entry.path) || !hash_is_valid_hex(hash) || !mode_is_supported(mode)) {
         return MG_INVALID_ARG;
     }
 
     memset(&entry, 0, sizeof(entry));
     strcpy(entry.path, path);
     strcpy(entry.hash, hash);
+    entry.mode = mode;
     entry.size = size;
 
     result = ensure_capacity(tree, tree->count + 1);
@@ -154,14 +159,17 @@ static MGResult parse_tree_line(Tree *tree, char *line) {
     if (mode == NULL || type == NULL || hash == NULL || size_text == NULL || extra != NULL) {
         return MG_PARSE_ERROR;
     }
-    if (strcmp(mode, "100644") != 0 || strcmp(type, "blob") != 0 || !hash_is_valid_hex(hash)) {
+    if (strcmp(type, "blob") != 0 || !hash_is_valid_hex(hash)) {
+        return MG_PARSE_ERROR;
+    }
+    if (strcmp(mode, "100644") != 0 && strcmp(mode, "100755") != 0) {
         return MG_PARSE_ERROR;
     }
     if (parse_size(size_text, &size) != MG_OK) {
         return MG_PARSE_ERROR;
     }
 
-    return append_entry(tree, path, hash, size);
+    return append_entry(tree, path, hash, strcmp(mode, "100755") == 0 ? 0100755 : 0100644, size);
 }
 
 MGResult tree_from_index(const Index *index, Tree *tree) {
@@ -177,7 +185,13 @@ MGResult tree_from_index(const Index *index, Tree *tree) {
      */
     tree_init(tree);
     for (size_t i = 0; i < index->count; i++) {
-        result = append_entry(tree, index->entries[i].path, index->entries[i].hash, index->entries[i].size);
+        result = append_entry(
+            tree,
+            index->entries[i].path,
+            index->entries[i].hash,
+            index->entries[i].mode,
+            index->entries[i].size
+        );
         if (result != MG_OK) {
             tree_free(tree);
             return result;
@@ -203,7 +217,8 @@ MGResult tree_write(const Repository *repo, const Tree *tree, char out_hash[MG_H
         int line_size = snprintf(
             NULL,
             0,
-            "100644 blob %s %zu\t%s\n",
+            "%06o blob %s %zu\t%s\n",
+            tree->entries[i].mode,
             tree->entries[i].hash,
             tree->entries[i].size,
             tree->entries[i].path
@@ -224,7 +239,8 @@ MGResult tree_write(const Repository *repo, const Tree *tree, char out_hash[MG_H
         int written = snprintf(
             (char *)payload + offset,
             total_size + 1 - offset,
-            "100644 blob %s %zu\t%s\n",
+            "%06o blob %s %zu\t%s\n",
+            tree->entries[i].mode,
             tree->entries[i].hash,
             tree->entries[i].size,
             tree->entries[i].path
