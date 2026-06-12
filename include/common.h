@@ -16,6 +16,7 @@ typedef enum {
 } MGResult;
 
 #define MG_HASH_HEX_SIZE 65
+#define MG_GIT_HASH_HEX_SIZE 41
 #define MG_MAX_PATH 1024
 #define MG_MAX_BRANCH 128
 

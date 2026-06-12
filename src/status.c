@@ -222,10 +222,7 @@ static MGResult load_head_tree(const Repository *repo, Tree *tree) {
 static MGResult hash_working_file(const Repository *repo, const char *relative_path, char out_hash[MG_HASH_HEX_SIZE]) {
     char full_path[MG_MAX_PATH];
     unsigned char *file_data = NULL;
-    unsigned char *object_data;
     size_t file_size = 0;
-    int header_size;
-    size_t object_size;
     MGResult result;
 
     if (repo == NULL || relative_path == NULL || out_hash == NULL) {
@@ -240,27 +237,7 @@ static MGResult hash_working_file(const Repository *repo, const char *relative_p
         return result;
     }
 
-    header_size = snprintf(NULL, 0, "blob %zu", file_size);
-    if (header_size < 0) {
-        free(file_data);
-        return MG_ERROR;
-    }
-
-    object_size = (size_t)header_size + 1 + file_size;
-    object_data = malloc(object_size);
-    if (object_data == NULL) {
-        free(file_data);
-        return MG_ERROR;
-    }
-
-    snprintf((char *)object_data, (size_t)header_size + 1, "blob %zu", file_size);
-    object_data[header_size] = '\0';
-    if (file_size > 0) {
-        memcpy(object_data + header_size + 1, file_data, file_size);
-    }
-
-    result = hash_bytes(object_data, object_size, out_hash);
-    free(object_data);
+    result = hash_object_bytes("blob", file_data, file_size, hash_default_object_mode(), out_hash);
     free(file_data);
     return result;
 }

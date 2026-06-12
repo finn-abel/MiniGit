@@ -24,6 +24,18 @@ static void test_hash_bytes_known_value(void) {
     }
 }
 
+static void test_hash_object_git_mode(void) {
+    char hash[MG_HASH_HEX_SIZE];
+    const unsigned char payload[] = "hello world";
+    const char *expected = "95d09f2b10159347eece71399a7e2e907ea3df4f";
+
+    assert_ok(hash_object_bytes("blob", payload, strlen((const char *)payload), HASH_GIT_SHA1, hash), "git object hash failed");
+    if (strcmp(hash, expected) != 0) {
+        fprintf(stderr, "git object hash returned unexpected digest\n");
+        exit(1);
+    }
+}
+
 static void test_hash_file_matches_bytes(void) {
     const char *path = "tests/tmp_hash_file.dat";
     const unsigned char data[] = {0x00, 'h', 'a', 's', 'h', 0xff};
@@ -44,9 +56,14 @@ static void test_hash_file_matches_bytes(void) {
 
 static void test_hash_validation(void) {
     const char *valid = "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF";
+    const char *valid_git = "0123456789abcdef0123456789ABCDEF01234567";
 
     if (!hash_is_valid_hex(valid)) {
         fprintf(stderr, "valid hash was rejected\n");
+        exit(1);
+    }
+    if (!hash_is_valid_hex(valid_git)) {
+        fprintf(stderr, "valid git hash was rejected\n");
         exit(1);
     }
     if (hash_is_valid_hex("abc") || hash_is_valid_hex("zzzz456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")) {
@@ -57,6 +74,7 @@ static void test_hash_validation(void) {
 
 int main(void) {
     test_hash_bytes_known_value();
+    test_hash_object_git_mode();
     test_hash_file_matches_bytes();
     test_hash_validation();
     puts("test_hash passed");

@@ -122,6 +122,37 @@ static void test_write_read_blob_object(void) {
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
+static void test_write_read_git_hash_mode_object(void) {
+    Repository repo;
+    Object object;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char hash[MG_HASH_HEX_SIZE];
+    char object_dir_path[MG_MAX_PATH];
+    char object_path[MG_MAX_PATH];
+    const unsigned char payload[] = "hello world";
+    const char *expected = "95d09f2b10159347eece71399a7e2e907ea3df4f";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    setenv("MINIGIT_OBJECT_HASH_MODE", "git", 1);
+
+    assert_ok(object_write(&repo, "blob", payload, strlen((const char *)payload), hash), "git mode object_write failed");
+    assert_true(strcmp(hash, expected) == 0, "git mode object hash mismatch");
+
+    object_file_path_for_hash(hash, object_dir_path, object_path);
+    assert_true(fs_is_file(object_path), "git mode object file was not written");
+    assert_ok(object_read(&repo, hash, &object), "git mode object_read failed");
+    assert_true(strcmp(object.type, "blob") == 0, "git mode object type mismatch");
+    assert_true(object.size == strlen((const char *)payload), "git mode object size mismatch");
+    assert_true(memcmp(object.payload, payload, object.size) == 0, "git mode object payload mismatch");
+    object_free(&object);
+
+    unsetenv("MINIGIT_OBJECT_HASH_MODE");
+    assert_ok(fs_remove_file(object_path), "git mode object cleanup failed");
+    assert_true(rmdir(object_dir_path) == 0, "git mode object dir cleanup failed");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
 static void test_packfile_reads_after_loose_removal(void) {
     Repository repo;
     Object object;
@@ -248,6 +279,7 @@ static void test_resolve_ambiguous_object_prefix(void) {
 
 int main(void) {
     test_write_read_blob_object();
+    test_write_read_git_hash_mode_object();
     test_packfile_reads_after_loose_removal();
     test_resolve_unique_object_prefix();
     test_resolve_ambiguous_object_prefix();

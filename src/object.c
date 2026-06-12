@@ -145,7 +145,7 @@ static int is_object_fanout_dir(const char *name) {
  * is_object_file_name checks the 62-character file part of an object id.
  */
 static int is_object_file_name(const char *name) {
-    if (name == NULL || strlen(name) != MG_HASH_HEX_SIZE - 3) {
+    if (name == NULL || (strlen(name) != MG_HASH_HEX_SIZE - 3 && strlen(name) != MG_GIT_HASH_HEX_SIZE - 3)) {
         return 0;
     }
     for (size_t i = 0; name[i] != '\0'; i++) {
@@ -774,7 +774,7 @@ MGResult object_write(
         return result;
     }
 
-    result = hash_bytes(object_data, object_size, out_hash);
+    result = hash_bytes_with_mode(object_data, object_size, hash_default_object_mode(), out_hash);
     if (result != MG_OK) {
         free(object_data);
         return result;
