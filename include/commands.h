@@ -49,6 +49,11 @@ MGResult mg_command_show(int argc, char **argv);
 MGResult mg_command_branch(int argc, char **argv);
 
 /*
+ * mg_command_merge handles `minigit merge <branch>`.
+ */
+MGResult mg_command_merge(int argc, char **argv);
+
+/*
  * mg_command_switch handles `minigit switch <branch>`.
  */
 MGResult mg_command_switch(int argc, char **argv);

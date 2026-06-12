@@ -13,6 +13,7 @@
 #include "hash.h"
 #include "ignore.h"
 #include "index.h"
+#include "merge.h"
 #include "object.h"
 #include "repository.h"
 #include "reset.h"
@@ -772,6 +773,43 @@ MGResult mg_command_branch(int argc, char **argv) {
         puts("branch already exists");
     } else if (result != MG_OK) {
         puts("failed to create branch");
+    }
+    return result;
+}
+
+/*
+ * mg_command_merge handles `minigit merge <branch>`.
+ */
+MGResult mg_command_merge(int argc, char **argv) {
+    Repository repo;
+    MGResult result;
+
+    if (argc != 1) {
+        ignore_args(argc, argv);
+        puts("usage: minigit merge <branch>");
+        return MG_INVALID_ARG;
+    }
+    if (!repo_branch_name_is_valid(argv[0])) {
+        print_invalid_branch_name(argv[0]);
+        return MG_INVALID_ARG;
+    }
+
+    result = require_repo(&repo);
+    if (result != MG_OK) {
+        return result;
+    }
+
+    result = merge_branch(&repo, argv[0]);
+    if (result == MG_NOT_FOUND) {
+        puts("unknown branch");
+    } else if (result == MG_REPO_ERROR) {
+        puts("cannot merge before both branches have commits");
+    } else if (result == MG_CONFLICT) {
+        puts("merge has conflicts");
+    } else if (result != MG_OK) {
+        puts("failed to merge branch");
+    } else {
+        printf("merged branch %s\n", argv[0]);
     }
     return result;
 }
