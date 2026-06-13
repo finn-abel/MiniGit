@@ -2,9 +2,14 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <zlib.h>
 
 #include "fs.h"
@@ -12,6 +17,9 @@
 
 #define MG_LOOSE_ZLIB_PREFIX "MGZ1 "
 #define MG_PACK_HEADER "MGPACK1\n"
+#define MG_MAX_OBJECT_SIZE ((size_t)64 * 1024 * 1024)
+#define MG_MAX_STORED_OBJECT_SIZE ((size_t)128 * 1024 * 1024)
+#define MG_MAX_PACK_SIZE ((size_t)512 * 1024 * 1024)
 
 static MGResult parse_size(const char *text, size_t *out_size);
 
@@ -20,6 +28,29 @@ typedef struct {
     size_t size;
     size_t capacity;
 } PackBuffer;
+
+static int checked_add_size(size_t left, size_t right, size_t *out) {
+    if (left > SIZE_MAX - right) {
+        return 0;
+    }
+    *out = left + right;
+    return 1;
+}
+
+static MGResult read_file_limited(const char *path, size_t limit, unsigned char **out_data, size_t *out_size) {
+    struct stat st;
+
+    if (path == NULL || out_data == NULL || out_size == NULL) {
+        return MG_INVALID_ARG;
+    }
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return MG_IO_ERROR;
+    }
+    if (st.st_size < 0 || (uintmax_t)st.st_size > limit) {
+        return MG_PARSE_ERROR;
+    }
+    return fs_read_file(path, out_data, out_size);
+}
 
 /*
  * object_path calculates .minigit/objects/xx/yyyy... for a full object hash.
@@ -180,7 +211,11 @@ static MGResult build_object_bytes(
         return MG_ERROR;
     }
 
-    total_size = (size_t)header_size + 1 + size;
+    if (size > MG_MAX_OBJECT_SIZE ||
+        !checked_add_size((size_t)header_size, 1, &total_size) ||
+        !checked_add_size(total_size, size, &total_size)) {
+        return MG_INVALID_ARG;
+    }
     data = malloc(total_size);
     if (data == NULL) {
         return MG_ERROR;
@@ -207,6 +242,9 @@ static MGResult copy_bytes(const unsigned char *data, size_t size, unsigned char
         return MG_INVALID_ARG;
     }
 
+    if (size > MG_MAX_OBJECT_SIZE || size == SIZE_MAX) {
+        return MG_PARSE_ERROR;
+    }
     copy = malloc(size + 1);
     if (copy == NULL) {
         return MG_ERROR;
@@ -231,6 +269,9 @@ static MGResult compress_bytes(const unsigned char *data, size_t size, unsigned 
         return MG_INVALID_ARG;
     }
 
+    if (size > MG_MAX_OBJECT_SIZE || size > ULONG_MAX) {
+        return MG_INVALID_ARG;
+    }
     compressed_size = compressBound((uLong)size);
     compressed = malloc((size_t)compressed_size);
     if (compressed == NULL) {
@@ -263,6 +304,9 @@ static MGResult decompress_bytes(
         return MG_INVALID_ARG;
     }
 
+    if (uncompressed_size > MG_MAX_OBJECT_SIZE || uncompressed_size == SIZE_MAX || size > ULONG_MAX) {
+        return MG_PARSE_ERROR;
+    }
     uncompressed = malloc(uncompressed_size + 1);
     if (uncompressed == NULL) {
         return MG_ERROR;
@@ -356,7 +400,7 @@ static MGResult read_loose_object_bytes(
         return MG_NOT_FOUND;
     }
 
-    result = fs_read_file(path, &stored_data, &stored_size);
+    result = read_file_limited(path, MG_MAX_STORED_OBJECT_SIZE, &stored_data, &stored_size);
     if (result != MG_OK) {
         return result;
     }
@@ -392,7 +436,12 @@ static MGResult build_loose_storage(
         return MG_ERROR;
     }
 
-    stored = malloc((size_t)header_size + compressed_size);
+    size_t stored_size;
+    if (!checked_add_size((size_t)header_size, compressed_size, &stored_size)) {
+        free(compressed);
+        return MG_ERROR;
+    }
+    stored = malloc(stored_size);
     if (stored == NULL) {
         free(compressed);
         return MG_ERROR;
@@ -402,7 +451,7 @@ static MGResult build_loose_storage(
     free(compressed);
 
     *out_data = stored;
-    *out_size = (size_t)header_size + compressed_size;
+    *out_size = stored_size;
     return MG_OK;
 }
 
@@ -411,14 +460,15 @@ static MGResult build_loose_storage(
  */
 static MGResult parse_size(const char *text, size_t *out_size) {
     char *end = NULL;
-    unsigned long parsed;
+    uintmax_t parsed;
 
     if (text == NULL || text[0] == '\0' || out_size == NULL) {
         return MG_PARSE_ERROR;
     }
 
-    parsed = strtoul(text, &end, 10);
-    if (*end != '\0') {
+    errno = 0;
+    parsed = strtoumax(text, &end, 10);
+    if (errno != 0 || *end != '\0' || parsed > SIZE_MAX) {
         return MG_PARSE_ERROR;
     }
 
@@ -461,7 +511,10 @@ static MGResult parse_object(const unsigned char *data, size_t data_size, Object
     if (parse_size(space + 1, &payload_size) != MG_OK) {
         return MG_PARSE_ERROR;
     }
-    if (header_size + 1 + payload_size != data_size) {
+    size_t expected_size;
+    if (!checked_add_size(header_size, 1, &expected_size) ||
+        !checked_add_size(expected_size, payload_size, &expected_size) ||
+        expected_size != data_size || payload_size > MG_MAX_OBJECT_SIZE) {
         return MG_PARSE_ERROR;
     }
 
@@ -488,12 +541,15 @@ static MGResult pack_buffer_append(PackBuffer *buffer, const unsigned char *data
     if (buffer == NULL || (data == NULL && size > 0)) {
         return MG_INVALID_ARG;
     }
-    if (buffer->size + size < buffer->size) {
+    if (buffer->size + size < buffer->size || buffer->size + size > MG_MAX_PACK_SIZE) {
         return MG_ERROR;
     }
     if (buffer->size + size > buffer->capacity) {
         capacity = buffer->capacity == 0 ? 1024 : buffer->capacity;
         while (capacity < buffer->size + size) {
+            if (capacity > SIZE_MAX / 2) {
+                return MG_ERROR;
+            }
             capacity *= 2;
         }
         grown = realloc(buffer->data, capacity);
@@ -559,7 +615,7 @@ static MGResult read_packed_object_bytes(
         return MG_NOT_FOUND;
     }
 
-    result = fs_read_file(pack_path, &pack_data, &pack_size);
+    result = read_file_limited(pack_path, MG_MAX_PACK_SIZE, &pack_data, &pack_size);
     if (result != MG_OK) {
         return result;
     }
@@ -659,7 +715,7 @@ static MGResult scan_pack_prefix(
     if (!fs_is_file(pack_path)) {
         return MG_OK;
     }
-    result = fs_read_file(pack_path, &pack_data, &pack_size);
+    result = read_file_limited(pack_path, MG_MAX_PACK_SIZE, &pack_data, &pack_size);
     if (result != MG_OK) {
         return result;
     }
@@ -765,7 +821,7 @@ MGResult object_write(
     char path[MG_MAX_PATH];
     MGResult result;
 
-    if (repo == NULL || out_hash == NULL) {
+    if (repo == NULL || out_hash == NULL || size > MG_MAX_OBJECT_SIZE) {
         return MG_INVALID_ARG;
     }
 
@@ -787,8 +843,13 @@ MGResult object_write(
     }
 
     if (fs_exists(path)) {
+        Object existing;
+        result = object_read(repo, out_hash, &existing);
         free(object_data);
-        return MG_OK;
+        if (result == MG_OK) {
+            object_free(&existing);
+        }
+        return result;
     }
 
     if (fs_mkdir_p(dir_path) != MG_OK) {
@@ -801,7 +862,7 @@ MGResult object_write(
     if (result != MG_OK) {
         return result;
     }
-    result = fs_write_file(path, stored_data, stored_size);
+    result = fs_write_file_atomic(path, stored_data, stored_size);
     free(stored_data);
     return result;
 }
@@ -830,7 +891,23 @@ MGResult object_read(const Repository *repo, const char *hash, Object *out_objec
         return result;
     }
 
-    result = parse_object(data, data_size, out_object);
+    {
+        char actual_hash[MG_HASH_HEX_SIZE];
+        HashMode mode = strlen(hash) == MG_GIT_HASH_HEX_SIZE - 1 ? HASH_GIT_SHA1 : HASH_MINIGIT_SHA256;
+
+        result = hash_bytes_with_mode(data, data_size, mode, actual_hash);
+        if (result == MG_OK) {
+            for (size_t i = 0; hash[i] != '\0'; i++) {
+                if ((char)tolower((unsigned char)hash[i]) != actual_hash[i]) {
+                    result = MG_PARSE_ERROR;
+                    break;
+                }
+            }
+        }
+    }
+    if (result == MG_OK) {
+        result = parse_object(data, data_size, out_object);
+    }
     free(data);
     return result;
 }
@@ -992,7 +1069,17 @@ MGResult object_pack_all(const Repository *repo, size_t *out_count) {
             if (result != MG_OK) {
                 break;
             }
-            result = pack_buffer_append_object(&buffer, hash, object_data, object_size);
+            {
+                char actual_hash[MG_HASH_HEX_SIZE];
+                HashMode mode = strlen(hash) == MG_GIT_HASH_HEX_SIZE - 1 ? HASH_GIT_SHA1 : HASH_MINIGIT_SHA256;
+                result = hash_bytes_with_mode(object_data, object_size, mode, actual_hash);
+                if (result == MG_OK && strcmp(actual_hash, hash) != 0) {
+                    result = MG_PARSE_ERROR;
+                }
+            }
+            if (result == MG_OK) {
+                result = pack_buffer_append_object(&buffer, hash, object_data, object_size);
+            }
             free(object_data);
             if (result != MG_OK) {
                 break;
@@ -1012,7 +1099,7 @@ MGResult object_pack_all(const Repository *repo, size_t *out_count) {
         result = MG_IO_ERROR;
     }
     if (result == MG_OK) {
-        result = fs_write_file(pack_path, buffer.data, buffer.size);
+        result = fs_write_file_atomic(pack_path, buffer.data, buffer.size);
     }
     free(buffer.data);
     if (result != MG_OK) {

@@ -35,6 +35,12 @@ make test
 The test target builds and runs the unit tests, then removes generated binaries
 and object files with `make clean`.
 
+To run the suite with LLVM line, branch, and function coverage:
+
+```sh
+make coverage
+```
+
 ## Quick Start
 
 ```sh

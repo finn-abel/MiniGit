@@ -46,6 +46,11 @@ MGResult fs_read_file(const char *path, unsigned char **out_data, size_t *out_si
 MGResult fs_write_file(const char *path, const unsigned char *data, size_t size);
 
 /*
+ * fs_write_file_atomic replaces a file through a same-directory temporary file.
+ */
+MGResult fs_write_file_atomic(const char *path, const unsigned char *data, size_t size);
+
+/*
  * fs_join_path joins two path components into out.
  */
 MGResult fs_join_path(const char *left, const char *right, char *out, size_t out_size);
@@ -64,6 +69,41 @@ MGResult fs_remove_file(const char *path);
  * fs_repo_relative_path normalizes path to a repo-relative path.
  */
 MGResult fs_repo_relative_path(const char *repo_root, const char *path, char *out, size_t out_size);
+
+/*
+ * fs_repo_relative_path_is_valid reports whether a stored path is canonical and confined.
+ */
+int fs_repo_relative_path_is_valid(const char *path);
+
+/*
+ * fs_validate_worktree_path rejects symlinks and non-directory parent components.
+ */
+MGResult fs_validate_worktree_path(const char *repo_root, const char *relative_path);
+
+/*
+ * fs_read_worktree_file reads a confined regular worktree file.
+ */
+MGResult fs_read_worktree_file(
+    const char *repo_root,
+    const char *relative_path,
+    unsigned char **out_data,
+    size_t *out_size
+);
+
+/*
+ * fs_write_worktree_file atomically writes a confined worktree file.
+ */
+MGResult fs_write_worktree_file(
+    const char *repo_root,
+    const char *relative_path,
+    const unsigned char *data,
+    size_t size
+);
+
+/*
+ * fs_remove_worktree_file removes one confined regular worktree file.
+ */
+MGResult fs_remove_worktree_file(const char *repo_root, const char *relative_path);
 
 /*
  * fs_walk visits regular files below root_path using repo-relative paths.

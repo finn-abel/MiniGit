@@ -202,11 +202,39 @@ static void test_invalid_commit_inputs(void) {
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
+static void test_overflowing_commit_timestamp_rejected(void) {
+    Repository repo;
+    Commit commit;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char tree_hash[MG_HASH_HEX_SIZE];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    char payload[MG_MAX_PATH];
+    int written;
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    write_sample_tree(&repo, tree_hash);
+    written = snprintf(
+        payload,
+        sizeof(payload),
+        "tree %s\nauthor MiniGit User <minigit@example.com>\n"
+        "timestamp 184467440737095516160\nmessage invalid\n",
+        tree_hash
+    );
+    assert_true(written > 0 && (size_t)written < sizeof(payload), "overflowing commit payload too long");
+    assert_ok(object_write(&repo, "commit", (const unsigned char *)payload, (size_t)written, commit_hash),
+              "overflowing commit write failed");
+    assert_result(commit_read(&repo, commit_hash, &commit), MG_PARSE_ERROR,
+                  "overflowing commit timestamp should be rejected");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
 int main(void) {
     test_commit_create_read_first_commit();
     test_commit_with_parent();
     test_commit_author_from_environment();
     test_invalid_commit_inputs();
+    test_overflowing_commit_timestamp_rejected();
     puts("test_commit passed");
     return 0;
 }

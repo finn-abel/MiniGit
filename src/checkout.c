@@ -26,6 +26,157 @@ typedef struct {
     const char *target_path;
 } DirectoryCollisionContext;
 
+typedef struct {
+    Object object;
+} PreparedBlob;
+
+typedef struct {
+    char path[MG_MAX_PATH];
+    unsigned char *data;
+    size_t size;
+    unsigned int mode;
+} WorktreeBackup;
+
+static void prepared_blobs_free(PreparedBlob *prepared, size_t count) {
+    if (prepared == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        object_free(&prepared[i].object);
+    }
+    free(prepared);
+}
+
+static MGResult prepare_target_blobs(const Repository *repo, const Tree *tree, PreparedBlob **out_prepared) {
+    PreparedBlob *prepared;
+
+    if (repo == NULL || tree == NULL || out_prepared == NULL) {
+        return MG_INVALID_ARG;
+    }
+    *out_prepared = NULL;
+    if (tree->count == 0) {
+        return MG_OK;
+    }
+    prepared = calloc(tree->count, sizeof(prepared[0]));
+    if (prepared == NULL) {
+        return MG_ERROR;
+    }
+    for (size_t i = 0; i < tree->count; i++) {
+        MGResult result = object_read(repo, tree->entries[i].hash, &prepared[i].object);
+        if (result != MG_OK || strcmp(prepared[i].object.type, "blob") != 0 ||
+            prepared[i].object.size != tree->entries[i].size) {
+            prepared_blobs_free(prepared, tree->count);
+            return result == MG_OK ? MG_PARSE_ERROR : result;
+        }
+    }
+    *out_prepared = prepared;
+    return MG_OK;
+}
+
+static void worktree_backups_free(WorktreeBackup *backups, size_t count) {
+    if (backups == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(backups[i].data);
+    }
+    free(backups);
+}
+
+static MGResult backup_current_worktree(
+    const Repository *repo,
+    const Index *index,
+    WorktreeBackup **out_backups
+) {
+    WorktreeBackup *backups;
+
+    *out_backups = NULL;
+    if (index->count == 0) {
+        return MG_OK;
+    }
+    backups = calloc(index->count, sizeof(backups[0]));
+    if (backups == NULL) {
+        return MG_ERROR;
+    }
+    for (size_t i = 0; i < index->count; i++) {
+        char full_path[MG_MAX_PATH];
+        struct stat st;
+        MGResult result;
+
+        strcpy(backups[i].path, index->entries[i].path);
+        result = fs_read_worktree_file(
+            repo->worktree_path,
+            backups[i].path,
+            &backups[i].data,
+            &backups[i].size
+        );
+        if (result != MG_OK ||
+            fs_join_path(repo->worktree_path, backups[i].path, full_path, sizeof(full_path)) != MG_OK ||
+            lstat(full_path, &st) != 0) {
+            worktree_backups_free(backups, index->count);
+            return result == MG_OK ? MG_IO_ERROR : result;
+        }
+        backups[i].mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
+    }
+    *out_backups = backups;
+    return MG_OK;
+}
+
+static void prune_empty_parent_dirs(const Repository *repo, const char *relative_path) {
+    char parent[MG_MAX_PATH];
+
+    if (fs_parent_dir(relative_path, parent, sizeof(parent)) != MG_OK) {
+        return;
+    }
+    while (strcmp(parent, ".") != 0) {
+        char full_path[MG_MAX_PATH];
+        char next[MG_MAX_PATH];
+
+        if (fs_join_path(repo->worktree_path, parent, full_path, sizeof(full_path)) != MG_OK ||
+            rmdir(full_path) != 0 || fs_parent_dir(parent, next, sizeof(next)) != MG_OK) {
+            break;
+        }
+        strcpy(parent, next);
+    }
+}
+
+static MGResult rollback_worktree(
+    const Repository *repo,
+    const Tree *target_tree,
+    const WorktreeBackup *backups,
+    size_t backup_count
+) {
+    MGResult rollback_result = MG_OK;
+
+    for (size_t i = 0; i < target_tree->count; i++) {
+        MGResult result = fs_remove_worktree_file(repo->worktree_path, target_tree->entries[i].path);
+        if (result != MG_OK && result != MG_NOT_FOUND && result != MG_CONFLICT) {
+            rollback_result = result;
+        }
+    }
+    for (size_t i = target_tree->count; i > 0; i--) {
+        prune_empty_parent_dirs(repo, target_tree->entries[i - 1].path);
+    }
+    for (size_t i = 0; i < backup_count; i++) {
+        char full_path[MG_MAX_PATH];
+        MGResult result = fs_write_worktree_file(
+            repo->worktree_path,
+            backups[i].path,
+            backups[i].data,
+            backups[i].size
+        );
+        if (result == MG_OK &&
+            fs_join_path(repo->worktree_path, backups[i].path, full_path, sizeof(full_path)) == MG_OK &&
+            chmod(full_path, backups[i].mode == 0100755 ? 0755 : 0644) != 0) {
+            result = MG_IO_ERROR;
+        }
+        if (result != MG_OK) {
+            rollback_result = result;
+        }
+    }
+    return rollback_result;
+}
+
 /*
  * hash_working_file computes a blob object hash without storing an object.
  */
@@ -42,7 +193,7 @@ static MGResult hash_working_file(const Repository *repo, const char *relative_p
         return MG_INVALID_ARG;
     }
 
-    result = fs_read_file(full_path, &file_data, &file_size);
+    result = fs_read_worktree_file(repo->worktree_path, relative_path, &file_data, &file_size);
     if (result != MG_OK) {
         return result;
     }
@@ -65,7 +216,8 @@ static MGResult ensure_no_unstaged_changes(const Repository *repo, const Index *
         if (fs_join_path(repo->worktree_path, entry->path, full_path, sizeof(full_path)) != MG_OK) {
             return MG_INVALID_ARG;
         }
-        if (!fs_is_file(full_path)) {
+        result = fs_validate_worktree_path(repo->worktree_path, entry->path);
+        if (result != MG_OK || !fs_is_file(full_path)) {
             return MG_CONFLICT;
         }
         struct stat st;
@@ -218,8 +370,11 @@ static MGResult remove_files_absent_from_target(const Repository *repo, const In
         if (fs_join_path(repo->worktree_path, entry->path, full_path, sizeof(full_path)) != MG_OK) {
             return MG_INVALID_ARG;
         }
-        if (fs_exists(full_path) && fs_is_file(full_path) && fs_remove_file(full_path) != MG_OK) {
-            return MG_IO_ERROR;
+        if (fs_exists(full_path)) {
+            MGResult remove_result = fs_remove_worktree_file(repo->worktree_path, entry->path);
+            if (remove_result != MG_OK) {
+                return remove_result;
+            }
         }
     }
 
@@ -292,34 +447,30 @@ static MGResult remove_directories_replaced_by_files(const Repository *repo, con
 /*
  * restore_blob writes one target tree entry into the working tree.
  */
-static MGResult restore_blob(const Repository *repo, const TreeEntry *entry, Index *new_index) {
-    Object object;
+static MGResult restore_prepared_blob(
+    const Repository *repo,
+    const TreeEntry *entry,
+    const Object *object,
+    Index *new_index
+) {
     char full_path[MG_MAX_PATH];
     char parent_path[MG_MAX_PATH];
     struct stat st;
     MGResult result;
 
-    result = object_read(repo, entry->hash, &object);
-    if (result != MG_OK) {
-        return result;
-    }
-    if (strcmp(object.type, "blob") != 0) {
-        object_free(&object);
+    if (object == NULL || strcmp(object->type, "blob") != 0 || object->size != entry->size) {
         return MG_PARSE_ERROR;
     }
 
     if (fs_join_path(repo->worktree_path, entry->path, full_path, sizeof(full_path)) != MG_OK ||
         fs_parent_dir(full_path, parent_path, sizeof(parent_path)) != MG_OK) {
-        object_free(&object);
         return MG_INVALID_ARG;
     }
     if (strcmp(parent_path, ".") != 0 && fs_mkdir_p(parent_path) != MG_OK) {
-        object_free(&object);
         return MG_IO_ERROR;
     }
 
-    result = fs_write_file(full_path, object.payload, object.size);
-    object_free(&object);
+    result = fs_write_worktree_file(repo->worktree_path, entry->path, object->payload, object->size);
     if (result != MG_OK) {
         return result;
     }
@@ -333,15 +484,66 @@ static MGResult restore_blob(const Repository *repo, const TreeEntry *entry, Ind
     return index_add_or_update(new_index, entry->path, entry->hash, entry->mode, entry->size, st.st_mtime);
 }
 
+static MGResult restore_path_transaction(const Repository *repo, const TreeEntry *entry, Index *index) {
+    char full_path[MG_MAX_PATH];
+    unsigned char *backup_data = NULL;
+    size_t backup_size = 0;
+    unsigned int backup_mode = 0100644;
+    int existed = 0;
+    struct stat st;
+    Object object;
+    MGResult result;
+
+    if (fs_join_path(repo->worktree_path, entry->path, full_path, sizeof(full_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    result = object_read(repo, entry->hash, &object);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (lstat(full_path, &st) == 0) {
+        result = fs_read_worktree_file(repo->worktree_path, entry->path, &backup_data, &backup_size);
+        if (result != MG_OK) {
+            object_free(&object);
+            return result;
+        }
+        existed = 1;
+        backup_mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
+    }
+
+    result = restore_prepared_blob(repo, entry, &object, index);
+    object_free(&object);
+    if (result == MG_OK) {
+        result = index_save(repo, index);
+    }
+    if (result != MG_OK) {
+        if (existed) {
+            if (fs_write_worktree_file(repo->worktree_path, entry->path, backup_data, backup_size) == MG_OK) {
+                (void)chmod(full_path, backup_mode == 0100755 ? 0755 : 0644);
+            }
+        } else {
+            (void)fs_remove_worktree_file(repo->worktree_path, entry->path);
+            prune_empty_parent_dirs(repo, entry->path);
+        }
+    }
+    free(backup_data);
+    return result;
+}
+
 /*
  * restore_tree writes all target tree entries and builds the replacement index.
  */
-static MGResult restore_tree(const Repository *repo, const Tree *target_tree, Index *new_index) {
+static MGResult restore_tree(
+    const Repository *repo,
+    const Tree *target_tree,
+    const PreparedBlob *prepared,
+    Index *new_index
+) {
     MGResult result;
 
     index_init(new_index);
     for (size_t i = 0; i < target_tree->count; i++) {
-        result = restore_blob(repo, &target_tree->entries[i], new_index);
+        result = restore_prepared_blob(repo, &target_tree->entries[i], &prepared[i].object, new_index);
         if (result != MG_OK) {
             index_free(new_index);
             return result;
@@ -356,8 +558,13 @@ MGResult checkout_commit(const Repository *repo, const char commit_hash[MG_HASH_
     Tree target_tree;
     Index current_index;
     Index new_index;
+    PreparedBlob *prepared = NULL;
+    WorktreeBackup *backups = NULL;
     char head_contents[MG_HASH_HEX_SIZE + 1];
+    char old_head[MG_MAX_PATH];
     int written;
+    int new_index_ready = 0;
+    int index_updated = 0;
     MGResult result;
 
     if (repo == NULL || !hash_is_valid_hex(commit_hash)) {
@@ -383,16 +590,26 @@ MGResult checkout_commit(const Repository *repo, const char commit_hash[MG_HASH_
 
     result = ensure_no_unstaged_changes(repo, &current_index);
     if (result != MG_OK) {
-        index_free(&current_index);
-        tree_free(&target_tree);
-        return result;
+        goto done;
     }
 
     result = ensure_no_untracked_overwrites(repo, &current_index, &target_tree);
     if (result != MG_OK) {
-        index_free(&current_index);
-        tree_free(&target_tree);
-        return result;
+        goto done;
+    }
+    result = prepare_target_blobs(repo, &target_tree, &prepared);
+    if (result != MG_OK) {
+        goto done;
+    }
+    result = backup_current_worktree(repo, &current_index, &backups);
+    if (result != MG_OK) {
+        goto done;
+    }
+    if (detached) {
+        result = repo_read_head(repo, old_head, sizeof(old_head));
+        if (result != MG_OK) {
+            goto done;
+        }
     }
 
     result = remove_files_absent_from_target(repo, &current_index, &target_tree);
@@ -400,29 +617,47 @@ MGResult checkout_commit(const Repository *repo, const char commit_hash[MG_HASH_
         result = remove_directories_replaced_by_files(repo, &target_tree);
     }
     if (result == MG_OK) {
-        result = restore_tree(repo, &target_tree, &new_index);
+        result = restore_tree(repo, &target_tree, prepared, &new_index);
+        new_index_ready = result == MG_OK;
     }
-    index_free(&current_index);
-    tree_free(&target_tree);
     if (result != MG_OK) {
-        return result;
+        (void)rollback_worktree(repo, &target_tree, backups, current_index.count);
+        goto done;
     }
 
     result = index_save(repo, &new_index);
-    index_free(&new_index);
     if (result != MG_OK) {
-        return result;
+        (void)rollback_worktree(repo, &target_tree, backups, current_index.count);
+        goto done;
     }
+    index_updated = 1;
 
     if (detached) {
         written = snprintf(head_contents, sizeof(head_contents), "%s\n", commit_hash);
         if (written < 0 || (size_t)written >= sizeof(head_contents)) {
-            return MG_INVALID_ARG;
+            result = MG_INVALID_ARG;
+        } else {
+            result = repo_write_head(repo, head_contents);
         }
-        return repo_write_head(repo, head_contents);
+        if (result != MG_OK) {
+            if (index_updated) {
+                (void)index_save(repo, &current_index);
+            }
+            (void)repo_write_head(repo, old_head);
+            (void)rollback_worktree(repo, &target_tree, backups, current_index.count);
+            goto done;
+        }
     }
 
-    return MG_OK;
+done:
+    if (new_index_ready) {
+        index_free(&new_index);
+    }
+    worktree_backups_free(backups, current_index.count);
+    prepared_blobs_free(prepared, target_tree.count);
+    index_free(&current_index);
+    tree_free(&target_tree);
+    return result;
 }
 
 /*
@@ -471,10 +706,7 @@ MGResult checkout_restore_path(const Repository *repo, const char *relative_path
         return result;
     }
 
-    result = restore_blob(repo, entry, &index);
-    if (result == MG_OK) {
-        result = index_save(repo, &index);
-    }
+    result = restore_path_transaction(repo, entry, &index);
 
     index_free(&index);
     tree_free(&head_tree);
@@ -522,10 +754,7 @@ MGResult checkout_restore_path_from_commit(
         return result;
     }
 
-    result = restore_blob(repo, entry, &index);
-    if (result == MG_OK) {
-        result = index_save(repo, &index);
-    }
+    result = restore_path_transaction(repo, entry, &index);
 
     index_free(&index);
     tree_free(&target_tree);

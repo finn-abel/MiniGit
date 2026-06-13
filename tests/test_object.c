@@ -277,12 +277,40 @@ static void test_resolve_ambiguous_object_prefix(void) {
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
+static void test_tampered_and_oversized_objects_rejected(void) {
+    Repository repo;
+    Object object;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char hash[MG_HASH_HEX_SIZE];
+    char object_dir_path[MG_MAX_PATH];
+    char object_path[MG_MAX_PATH];
+    const unsigned char payload[] = "good\n";
+    const unsigned char tampered[] = "blob 5\0evil\n";
+    const unsigned char oversized[] = "MGZ1 67108865\nx";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    assert_ok(object_write(&repo, "blob", payload, sizeof(payload) - 1, hash), "write object for tamper test failed");
+    object_file_path_for_hash(hash, object_dir_path, object_path);
+
+    assert_ok(fs_write_file(object_path, tampered, sizeof(tampered) - 1), "write tampered object failed");
+    assert_result(object_read(&repo, hash, &object), MG_PARSE_ERROR, "tampered object hash should be rejected");
+
+    assert_ok(fs_write_file(object_path, oversized, sizeof(oversized) - 1), "write oversized object failed");
+    assert_result(object_read(&repo, hash, &object), MG_PARSE_ERROR, "oversized object should be rejected");
+
+    assert_ok(fs_remove_file(object_path), "tampered object cleanup failed");
+    assert_true(rmdir(object_dir_path) == 0, "tampered object directory cleanup failed");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
 int main(void) {
     test_write_read_blob_object();
     test_write_read_git_hash_mode_object();
     test_packfile_reads_after_loose_removal();
     test_resolve_unique_object_prefix();
     test_resolve_ambiguous_object_prefix();
+    test_tampered_and_oversized_objects_rejected();
     puts("test_object passed");
     return 0;
 }

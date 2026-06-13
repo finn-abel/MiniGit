@@ -30,8 +30,21 @@ static void test_binary_read_write(void) {
     assert_ok(fs_remove_file(path), "fs_remove_file failed");
 }
 
+static void test_repo_path_validation(void) {
+    if (!fs_repo_relative_path_is_valid("dir/file.txt") ||
+        fs_repo_relative_path_is_valid("../file.txt") ||
+        fs_repo_relative_path_is_valid("dir/../file.txt") ||
+        fs_repo_relative_path_is_valid("/absolute") ||
+        fs_repo_relative_path_is_valid(".minigit/HEAD") ||
+        fs_repo_relative_path_is_valid("bad\tpath")) {
+        fprintf(stderr, "repository path validation failed\n");
+        exit(1);
+    }
+}
+
 int main(void) {
     test_binary_read_write();
+    test_repo_path_validation();
     puts("All fs tests passed.");
     return 0;
 }

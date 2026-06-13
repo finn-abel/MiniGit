@@ -30,6 +30,14 @@ typedef struct {
     const char *base_relative;
 } AddContext;
 
+typedef struct {
+    char path[MG_MAX_PATH];
+    unsigned char *data;
+    size_t size;
+    unsigned int mode;
+    int exists;
+} RmBackup;
+
 /*
  * ignore_args keeps temporary stubs warning-free until real validation exists.
  */
@@ -67,7 +75,7 @@ static MGResult stage_file(const Repository *repo, Index *index, const char *rel
         return MG_INVALID_ARG;
     }
 
-    result = fs_read_file(full_path, &data, &size);
+    result = fs_read_worktree_file(repo->worktree_path, relative_path, &data, &size);
     if (result != MG_OK) {
         return result;
     }
@@ -131,6 +139,12 @@ static MGResult stage_path(const Repository *repo, Index *index, const IgnoreRul
     } else if (fs_join_path(repo->worktree_path, relative_path, full_path, sizeof(full_path)) != MG_OK) {
         return MG_INVALID_ARG;
     }
+    if (relative_path[0] != '\0') {
+        MGResult result = fs_validate_worktree_path(repo->worktree_path, relative_path);
+        if (result != MG_OK) {
+            return result;
+        }
+    }
 
     if (lstat(full_path, &st) != 0) {
         return MG_NOT_FOUND;
@@ -155,7 +169,12 @@ static MGResult stage_path(const Repository *repo, Index *index, const IgnoreRul
 /*
  * remove_tracked_path removes one tracked file from the index and working tree.
  */
-static MGResult remove_tracked_path(const Repository *repo, Index *index, const char *input_path) {
+static MGResult normalize_tracked_path(
+    const Repository *repo,
+    const Index *index,
+    const char *input_path,
+    char out_path[MG_MAX_PATH]
+) {
     char relative_path[MG_MAX_PATH];
     char full_path[MG_MAX_PATH];
     const IndexEntry *entry;
@@ -174,21 +193,71 @@ static MGResult remove_tracked_path(const Repository *repo, Index *index, const 
     if (fs_join_path(repo->worktree_path, relative_path, full_path, sizeof(full_path)) != MG_OK) {
         return MG_INVALID_ARG;
     }
-    if (fs_exists(full_path)) {
-        if (!fs_is_file(full_path)) {
-            return MG_INVALID_ARG;
-        }
-        if (fs_remove_file(full_path) != MG_OK) {
-            return MG_IO_ERROR;
-        }
+    if (fs_exists(full_path) &&
+        (fs_validate_worktree_path(repo->worktree_path, relative_path) != MG_OK || !fs_is_file(full_path))) {
+        return MG_CONFLICT;
     }
-
-    if (index_remove(index, relative_path) != MG_OK) {
-        return MG_ERROR;
-    }
-
-    printf("removed %s\n", relative_path);
+    strcpy(out_path, relative_path);
     return MG_OK;
+}
+
+static MGResult clone_index(const Index *source, Index *destination) {
+    MGResult result = MG_OK;
+
+    index_init(destination);
+    for (size_t i = 0; i < source->count; i++) {
+        result = index_add_or_update(
+            destination,
+            source->entries[i].path,
+            source->entries[i].hash,
+            source->entries[i].mode,
+            source->entries[i].size,
+            source->entries[i].mtime
+        );
+        if (result != MG_OK) {
+            index_free(destination);
+            return result;
+        }
+    }
+    return MG_OK;
+}
+
+static void rm_backups_free(RmBackup *backups, size_t count) {
+    if (backups == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(backups[i].data);
+    }
+    free(backups);
+}
+
+static MGResult restore_rm_backups(const Repository *repo, const RmBackup *backups, size_t count) {
+    MGResult rollback_result = MG_OK;
+
+    for (size_t i = 0; i < count; i++) {
+        char full_path[MG_MAX_PATH];
+        MGResult result;
+
+        if (!backups[i].exists) {
+            continue;
+        }
+        result = fs_write_worktree_file(
+            repo->worktree_path,
+            backups[i].path,
+            backups[i].data,
+            backups[i].size
+        );
+        if (result == MG_OK &&
+            fs_join_path(repo->worktree_path, backups[i].path, full_path, sizeof(full_path)) == MG_OK &&
+            chmod(full_path, backups[i].mode == 0100755 ? 0755 : 0644) != 0) {
+            result = MG_IO_ERROR;
+        }
+        if (result != MG_OK) {
+            rollback_result = result;
+        }
+    }
+    return rollback_result;
 }
 
 /*
@@ -434,6 +503,8 @@ MGResult mg_command_add(int argc, char **argv) {
 MGResult mg_command_rm(int argc, char **argv) {
     Repository repo;
     Index index;
+    Index next_index;
+    RmBackup *backups = NULL;
     MGResult result;
 
     if (argc < 1) {
@@ -452,15 +523,76 @@ MGResult mg_command_rm(int argc, char **argv) {
         return result;
     }
 
+    backups = calloc((size_t)argc, sizeof(backups[0]));
+    if (backups == NULL) {
+        index_free(&index);
+        return MG_ERROR;
+    }
+
     for (int i = 0; i < argc; i++) {
-        result = remove_tracked_path(&repo, &index, argv[i]);
+        char full_path[MG_MAX_PATH];
+        struct stat st;
+
+        result = normalize_tracked_path(&repo, &index, argv[i], backups[i].path);
         if (result != MG_OK) {
+            rm_backups_free(backups, (size_t)argc);
             index_free(&index);
             return result;
         }
+        if (fs_join_path(repo.worktree_path, backups[i].path, full_path, sizeof(full_path)) != MG_OK) {
+            result = MG_INVALID_ARG;
+            break;
+        }
+        if (lstat(full_path, &st) == 0) {
+            backups[i].exists = 1;
+            backups[i].mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
+            result = fs_read_worktree_file(
+                repo.worktree_path,
+                backups[i].path,
+                &backups[i].data,
+                &backups[i].size
+            );
+            if (result != MG_OK) {
+                break;
+            }
+        }
+    }
+    if (result != MG_OK) {
+        rm_backups_free(backups, (size_t)argc);
+        index_free(&index);
+        return result;
     }
 
-    result = index_save(&repo, &index);
+    result = clone_index(&index, &next_index);
+    if (result != MG_OK) {
+        rm_backups_free(backups, (size_t)argc);
+        index_free(&index);
+        return result;
+    }
+    for (int i = 0; i < argc; i++) {
+        result = index_remove(&next_index, backups[i].path);
+        if (result != MG_OK) {
+            break;
+        }
+    }
+    for (int i = 0; i < argc && result == MG_OK; i++) {
+        if (backups[i].exists) {
+            result = fs_remove_worktree_file(repo.worktree_path, backups[i].path);
+        }
+    }
+
+    if (result == MG_OK) {
+        result = index_save(&repo, &next_index);
+    }
+    if (result != MG_OK) {
+        (void)restore_rm_backups(&repo, backups, (size_t)argc);
+    } else {
+        for (int i = 0; i < argc; i++) {
+            printf("removed %s\n", backups[i].path);
+        }
+    }
+    index_free(&next_index);
+    rm_backups_free(backups, (size_t)argc);
     index_free(&index);
     if (result != MG_OK) {
         puts("failed to save index");
@@ -856,6 +988,8 @@ MGResult mg_command_merge(int argc, char **argv) {
 MGResult mg_command_switch(int argc, char **argv) {
     Repository repo;
     char branch_commit[MG_HASH_HEX_SIZE];
+    char old_commit[MG_HASH_HEX_SIZE];
+    char old_head[MG_MAX_PATH];
     MGResult result;
 
     if (argc != 1) {
@@ -870,6 +1004,17 @@ MGResult mg_command_switch(int argc, char **argv) {
 
     result = require_repo(&repo);
     if (result != MG_OK) {
+        return result;
+    }
+
+    result = repo_read_head(&repo, old_head, sizeof(old_head));
+    if (result != MG_OK) {
+        puts("failed to read HEAD");
+        return result;
+    }
+    result = repo_current_commit(&repo, old_commit, sizeof(old_commit));
+    if (result != MG_OK) {
+        puts("failed to resolve current commit");
         return result;
     }
 
@@ -899,6 +1044,10 @@ MGResult mg_command_switch(int argc, char **argv) {
 
     result = repo_write_head_to_branch(&repo, argv[0]);
     if (result != MG_OK) {
+        if (old_commit[0] != '\0') {
+            (void)checkout_commit(&repo, old_commit, 0);
+        }
+        (void)repo_write_head(&repo, old_head);
         puts("failed to update HEAD");
         return result;
     }

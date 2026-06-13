@@ -149,9 +149,42 @@ static void test_malformed_tree_rejected(void) {
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
+static void test_traversal_tree_path_rejected(void) {
+    Repository repo;
+    Tree tree;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char tree_hash[MG_HASH_HEX_SIZE];
+    const unsigned char bad_payload[] =
+        "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1\t../victim\n";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    assert_ok(object_write(&repo, "tree", bad_payload, sizeof(bad_payload) - 1, tree_hash), "traversal tree write failed");
+    assert_result(tree_read(&repo, tree_hash, &tree), MG_PARSE_ERROR, "traversal tree path should be rejected");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
+static void test_overflowing_tree_size_rejected(void) {
+    Repository repo;
+    Tree tree;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char tree_hash[MG_HASH_HEX_SIZE];
+    const unsigned char bad_payload[] =
+        "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "
+        "184467440737095516160\tfile.txt\n";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    assert_ok(object_write(&repo, "tree", bad_payload, sizeof(bad_payload) - 1, tree_hash), "overflowing tree write failed");
+    assert_result(tree_read(&repo, tree_hash, &tree), MG_PARSE_ERROR, "overflowing tree size should be rejected");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
 int main(void) {
     test_tree_write_read_roundtrip();
     test_malformed_tree_rejected();
+    test_traversal_tree_path_rejected();
+    test_overflowing_tree_size_rejected();
     puts("test_tree passed");
     return 0;
 }

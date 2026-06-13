@@ -232,7 +232,7 @@ static MGResult hash_working_file(const Repository *repo, const char *relative_p
         return MG_INVALID_ARG;
     }
 
-    result = fs_read_file(full_path, &file_data, &file_size);
+    result = fs_read_worktree_file(repo->worktree_path, relative_path, &file_data, &file_size);
     if (result != MG_OK) {
         return result;
     }
@@ -250,6 +250,12 @@ static MGResult compare_head_to_index(const Tree *head_tree, const Index *index,
     const IndexEntry *index_entry;
     MGResult result;
 
+    if (head_tree == NULL || index == NULL || staged == NULL ||
+        (head_tree->count > 0 && head_tree->entries == NULL) ||
+        (index->count > 0 && index->entries == NULL)) {
+        return MG_INVALID_ARG;
+    }
+
     for (size_t i = 0; i < index->count; i++) {
         index_entry = &index->entries[i];
         head_entry = tree_find(head_tree, index_entry->path);
@@ -260,7 +266,7 @@ static MGResult compare_head_to_index(const Tree *head_tree, const Index *index,
                 const TreeEntry *candidate = &head_tree->entries[j];
                 if (index_find_const(index, candidate->path) == NULL &&
                     !change_list_has_rename_from(staged, candidate->path) &&
-                    strcmp(candidate->hash, index_entry->hash) == 0 &&
+                    memcmp(candidate->hash, index_entry->hash, MG_HASH_HEX_SIZE) == 0 &&
                     candidate->mode == index_entry->mode) {
                     result = change_list_add_rename(staged, candidate->path, index_entry->path);
                     renamed = 1;
@@ -270,7 +276,8 @@ static MGResult compare_head_to_index(const Tree *head_tree, const Index *index,
             if (result == MG_OK && !renamed) {
                 result = change_list_add(staged, CHANGE_ADDED, index_entry->path);
             }
-        } else if (strcmp(head_entry->hash, index_entry->hash) != 0 || head_entry->mode != index_entry->mode) {
+        } else if (memcmp(head_entry->hash, index_entry->hash, MG_HASH_HEX_SIZE) != 0 ||
+                   head_entry->mode != index_entry->mode) {
             result = change_list_add(staged, CHANGE_MODIFIED, index_entry->path);
         } else {
             result = MG_OK;
@@ -309,7 +316,12 @@ static MGResult compare_index_to_worktree(const Repository *repo, const Index *i
         if (fs_join_path(repo->worktree_path, entry->path, full_path, sizeof(full_path)) != MG_OK) {
             return MG_INVALID_ARG;
         }
-        if (!fs_exists(full_path)) {
+        result = fs_validate_worktree_path(repo->worktree_path, entry->path);
+        if (result == MG_CONFLICT) {
+            result = change_list_add(unstaged, CHANGE_MODIFIED, entry->path);
+        } else if (result != MG_OK) {
+            return result;
+        } else if (!fs_exists(full_path)) {
             result = change_list_add(unstaged, CHANGE_DELETED, entry->path);
         } else if (!fs_is_file(full_path)) {
             result = change_list_add(unstaged, CHANGE_MODIFIED, entry->path);

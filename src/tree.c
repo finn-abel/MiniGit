@@ -1,9 +1,13 @@
 #include "tree.h"
 
+#include <errno.h>
+#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "fs.h"
 #include "hash.h"
 #include "object.h"
 
@@ -36,6 +40,21 @@ static void tree_sort(Tree *tree) {
     if (tree != NULL && tree->count > 1) {
         qsort(tree->entries, tree->count, sizeof(tree->entries[0]), compare_tree_entries);
     }
+}
+
+static int paths_conflict(const char *left, const char *right) {
+    size_t left_len = strlen(left);
+    return strcmp(left, right) == 0 ||
+           (left_len < strlen(right) && strncmp(left, right, left_len) == 0 && right[left_len] == '/');
+}
+
+static MGResult tree_validate_paths(const Tree *tree) {
+    for (size_t i = 1; i < tree->count; i++) {
+        if (paths_conflict(tree->entries[i - 1].path, tree->entries[i].path)) {
+            return MG_PARSE_ERROR;
+        }
+    }
+    return MG_OK;
 }
 
 /*
@@ -82,8 +101,9 @@ static MGResult append_entry(Tree *tree, const char *path, const char *hash, uns
     TreeEntry entry;
     MGResult result;
 
-    if (tree == NULL || path == NULL || hash == NULL || path[0] == '\0' ||
-        strlen(path) >= sizeof(entry.path) || !hash_is_valid_hex(hash) || !mode_is_supported(mode)) {
+    if (tree == NULL || path == NULL || hash == NULL ||
+        !fs_repo_relative_path_is_valid(path) || strlen(path) >= sizeof(entry.path) ||
+        !hash_is_valid_hex(hash) || !mode_is_supported(mode)) {
         return MG_INVALID_ARG;
     }
 
@@ -109,14 +129,15 @@ static MGResult append_entry(Tree *tree, const char *path, const char *hash, uns
  */
 static MGResult parse_size(const char *text, size_t *out_size) {
     char *end = NULL;
-    unsigned long parsed;
+    uintmax_t parsed;
 
     if (text == NULL || text[0] == '\0' || out_size == NULL) {
         return MG_PARSE_ERROR;
     }
 
-    parsed = strtoul(text, &end, 10);
-    if (*end != '\0') {
+    errno = 0;
+    parsed = strtoumax(text, &end, 10);
+    if (errno != 0 || *end != '\0' || parsed > SIZE_MAX) {
         return MG_PARSE_ERROR;
     }
 
@@ -169,7 +190,16 @@ static MGResult parse_tree_line(Tree *tree, char *line) {
         return MG_PARSE_ERROR;
     }
 
-    return append_entry(tree, path, hash, strcmp(mode, "100755") == 0 ? 0100755 : 0100644, size);
+    {
+        MGResult result = append_entry(
+            tree,
+            path,
+            hash,
+            strcmp(mode, "100755") == 0 ? 0100755 : 0100644,
+            size
+        );
+        return result == MG_INVALID_ARG ? MG_PARSE_ERROR : result;
+    }
 }
 
 MGResult tree_from_index(const Index *index, Tree *tree) {
@@ -199,7 +229,11 @@ MGResult tree_from_index(const Index *index, Tree *tree) {
     }
 
     tree_sort(tree);
-    return MG_OK;
+    result = tree_validate_paths(tree);
+    if (result != MG_OK) {
+        tree_free(tree);
+    }
+    return result;
 }
 
 MGResult tree_write(const Repository *repo, const Tree *tree, char out_hash[MG_HASH_HEX_SIZE]) {
@@ -314,7 +348,11 @@ MGResult tree_read(const Repository *repo, const char *hash, Tree *tree) {
         return result;
     }
     tree_sort(tree);
-    return MG_OK;
+    result = tree_validate_paths(tree);
+    if (result != MG_OK) {
+        tree_free(tree);
+    }
+    return result;
 }
 
 const TreeEntry *tree_find_entry(const Tree *tree, const char *path) {

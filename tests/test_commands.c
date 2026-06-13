@@ -352,6 +352,99 @@ static void test_add_respects_minigitignore(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_add_rejects_symlinked_parent(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char outside_dir[MG_MAX_PATH];
+    char outside_file[MG_MAX_PATH];
+    char *add_args[] = {"escape/secret.txt"};
+
+    make_temp_dir("commands_symlink", original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_true(snprintf(outside_dir, sizeof(outside_dir), "%s_outside", temp_dir) > 0, "outside dir path failed");
+    assert_result(mkdir(outside_dir, 0700) == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "mkdir outside failed");
+    assert_result(fs_join_path(outside_dir, "secret.txt", outside_file, sizeof(outside_file)), MG_OK,
+        "outside file path failed");
+    assert_result(fs_write_file(outside_file, (const unsigned char *)"secret\n", 7), MG_OK, "write outside failed");
+    assert_result(symlink(outside_dir, "escape") == 0 ? MG_OK : MG_IO_ERROR, MG_OK, "create symlink failed");
+
+    assert_result(mg_command_add(1, add_args), MG_CONFLICT, "add should reject a symlinked parent");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+    (void)unlink(outside_file);
+    (void)rmdir(outside_dir);
+}
+
+static void test_rm_validates_all_paths_before_deleting(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"a.txt", "b.txt"};
+    char *commit_args[] = {"-m", "base"};
+    char *rm_args[] = {"a.txt", "missing.txt"};
+
+    make_temp_dir("commands_rm_transaction", original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("a.txt", (const unsigned char *)"a\n", 2), MG_OK, "write a failed");
+    assert_result(fs_write_file("b.txt", (const unsigned char *)"b\n", 2), MG_OK, "write b failed");
+    assert_result(mg_command_add(2, add_args), MG_OK, "add files failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit failed");
+
+    assert_result(mg_command_rm(2, rm_args), MG_NOT_FOUND, "rm should reject the full operation");
+    assert_true(fs_is_file("a.txt"), "first rm path should remain after later validation failure");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(index_load(&repo, &index), MG_OK, "index_load failed");
+    assert_true(index_find_const(&index, "a.txt") != NULL, "first rm path should remain indexed");
+    index_free(&index);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_rm_rolls_back_when_index_save_fails(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"a.txt", "script.sh"};
+    char *commit_args[] = {"-m", "base"};
+    char *rm_args[] = {"a.txt", "script.sh"};
+    unsigned char *data = NULL;
+    size_t size = 0;
+    struct stat st;
+
+    make_temp_dir("commands_rm_rollback", original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("a.txt", (const unsigned char *)"a\n", 2), MG_OK, "write a failed");
+    assert_result(fs_write_file("script.sh", (const unsigned char *)"#!/bin/sh\n", 10), MG_OK,
+                  "write script failed");
+    assert_true(chmod("script.sh", 0755) == 0, "chmod script failed");
+    assert_result(mg_command_add(2, add_args), MG_OK, "add files failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit failed");
+
+    assert_true(chmod(".minigit", 0500) == 0, "make metadata directory read-only failed");
+    assert_result(mg_command_rm(2, rm_args), MG_IO_ERROR,
+                  "rm should fail when the index cannot be replaced");
+    assert_true(chmod(".minigit", 0700) == 0, "restore metadata permissions failed");
+
+    assert_result(fs_read_file("a.txt", &data, &size), MG_OK, "rollback did not restore a.txt");
+    assert_true(size == 2 && memcmp(data, "a\n", 2) == 0, "restored a.txt contents mismatch");
+    free(data);
+    data = NULL;
+    assert_result(fs_read_file("script.sh", &data, &size), MG_OK, "rollback did not restore script.sh");
+    assert_true(size == 10 && memcmp(data, "#!/bin/sh\n", 10) == 0, "restored script contents mismatch");
+    free(data);
+    assert_true(lstat("script.sh", &st) == 0 && (st.st_mode & S_IXUSR) != 0,
+                "rollback did not restore executable mode");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(index_load(&repo, &index), MG_OK, "index_load failed");
+    assert_true(index_find_const(&index, "a.txt") != NULL, "rollback removed a.txt from index");
+    assert_true(index_find_const(&index, "script.sh") != NULL, "rollback removed script.sh from index");
+    index_free(&index);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_repo_required_commands();
     test_command_validation_before_repo_open();
@@ -360,6 +453,9 @@ int main(void) {
     test_branch_command_create();
     test_branch_command_delete();
     test_add_respects_minigitignore();
+    test_add_rejects_symlinked_parent();
+    test_rm_validates_all_paths_before_deleting();
+    test_rm_rolls_back_when_index_save_fails();
     puts("All commands tests passed.");
     return 0;
 }

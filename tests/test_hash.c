@@ -24,6 +24,20 @@ static void test_hash_bytes_known_value(void) {
     }
 }
 
+static void test_hash_to_hex(void) {
+    unsigned char digest[32];
+    char hex[MG_HASH_HEX_SIZE];
+
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        digest[i] = (unsigned char)i;
+    }
+    hash_to_hex(digest, hex);
+    if (strcmp(hex, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f") != 0) {
+        fprintf(stderr, "hash_to_hex returned unexpected text\n");
+        exit(1);
+    }
+}
+
 static void test_hash_object_git_mode(void) {
     char hash[MG_HASH_HEX_SIZE];
     const unsigned char payload[] = "hello world";
@@ -74,6 +88,7 @@ static void test_hash_validation(void) {
 
 int main(void) {
     test_hash_bytes_known_value();
+    test_hash_to_hex();
     test_hash_object_git_mode();
     test_hash_file_matches_bytes();
     test_hash_validation();

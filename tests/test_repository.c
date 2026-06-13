@@ -213,11 +213,43 @@ static void test_branch_delete(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_malformed_head_ref_rejected(void) {
+    Repository repo;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char target_path[MG_MAX_PATH];
+    char head_contents[MG_MAX_PATH];
+    char current_hash[MG_HASH_HEX_SIZE];
+    unsigned char *target_data = NULL;
+    size_t target_size = 0;
+    const char *hash = "6666666666666666666666666666666666666666666666666666666666666666";
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(repo_init(&repo), MG_OK, "repo_init failed");
+    assert_true(snprintf(target_path, sizeof(target_path), "/tmp/minigit_head_target_%ld", (long)getpid()) > 0,
+        "target path failed");
+    assert_true(snprintf(head_contents, sizeof(head_contents), "ref: ../../minigit_head_target_%ld\n", (long)getpid()) > 0,
+        "HEAD contents failed");
+    assert_result(fs_write_file(target_path, (const unsigned char *)"unchanged\n", 10), MG_OK, "write target failed");
+    assert_result(fs_write_file(".minigit/HEAD", (const unsigned char *)head_contents, strlen(head_contents)), MG_OK,
+        "write malformed HEAD failed");
+
+    assert_result(repo_current_commit(&repo, current_hash, sizeof(current_hash)), MG_REPO_ERROR,
+        "malformed HEAD should not resolve");
+    assert_result(repo_update_current_ref(&repo, hash), MG_REPO_ERROR, "malformed HEAD should not redirect writes");
+    assert_result(fs_read_file(target_path, &target_data, &target_size), MG_OK, "read target failed");
+    assert_true(target_size == 10 && memcmp(target_data, "unchanged\n", 10) == 0, "external target was modified");
+    free(target_data);
+    (void)unlink(target_path);
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_init_and_open();
     test_ref_updates_and_detached_head();
     test_branch_create_and_validation();
     test_branch_delete();
+    test_malformed_head_ref_rejected();
     puts("All repository tests passed.");
     return 0;
 }

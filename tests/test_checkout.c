@@ -432,6 +432,187 @@ static void test_checkout_path_missing_from_commit(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_restore_rejects_external_symlink_target(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char victim_path[MG_MAX_PATH];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    char *restore_args[] = {"file.txt"};
+    unsigned char *victim_data = NULL;
+    size_t victim_size = 0;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_file("committed\n", "base", commit_hash);
+    assert_true(snprintf(victim_path, sizeof(victim_path), "%s_victim", temp_dir) > 0, "victim path failed");
+    assert_result(fs_write_file(victim_path, (const unsigned char *)"outside\n", 8), MG_OK, "write victim failed");
+    assert_true(unlink("file.txt") == 0, "unlink tracked file failed");
+    assert_true(symlink(victim_path, "file.txt") == 0, "create tracked symlink failed");
+
+    assert_result(mg_command_restore(1, restore_args), MG_CONFLICT, "restore should reject symlink target");
+    assert_result(fs_read_file(victim_path, &victim_data, &victim_size), MG_OK, "read victim failed");
+    assert_true(victim_size == 8 && memcmp(victim_data, "outside\n", 8) == 0, "restore overwrote external target");
+    free(victim_data);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+    (void)unlink(victim_path);
+    (void)commit_hash;
+}
+
+static void test_checkout_prevalidates_all_target_blobs(void) {
+    Repository repo;
+    Commit commit;
+    Tree tree;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char target_hash[MG_HASH_HEX_SIZE];
+    char current_hash[MG_HASH_HEX_SIZE];
+    char object_dir[MG_MAX_PATH];
+    char object_path[MG_MAX_PATH];
+    char fanout[3];
+    char *add_args[] = {"old.txt", "keep.txt"};
+    char *commit_args[] = {"-m", "target"};
+    char *rm_args[] = {"old.txt"};
+    char *add_keep_args[] = {"keep.txt"};
+    char *current_commit_args[] = {"-m", "current"};
+    char *checkout_args[] = {target_hash};
+    char *contents;
+    const TreeEntry *old_entry;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("old.txt", (const unsigned char *)"old\n", 4), MG_OK, "write old failed");
+    assert_result(fs_write_file("keep.txt", (const unsigned char *)"one\n", 4), MG_OK, "write keep failed");
+    assert_result(mg_command_add(2, add_args), MG_OK, "add target files failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "target commit failed");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(repo_current_commit(&repo, target_hash, sizeof(target_hash)), MG_OK, "read target hash failed");
+
+    assert_result(mg_command_rm(1, rm_args), MG_OK, "remove old failed");
+    assert_result(fs_write_file("keep.txt", (const unsigned char *)"two\n", 4), MG_OK, "write current keep failed");
+    assert_result(mg_command_add(1, add_keep_args), MG_OK, "add current keep failed");
+    assert_result(mg_command_commit(2, current_commit_args), MG_OK, "current commit failed");
+    assert_result(repo_current_commit(&repo, current_hash, sizeof(current_hash)), MG_OK, "read current hash failed");
+
+    assert_result(commit_read(&repo, target_hash, &commit), MG_OK, "read target commit failed");
+    assert_result(tree_read(&repo, commit.tree_hash, &tree), MG_OK, "read target tree failed");
+    old_entry = tree_find_entry(&tree, "old.txt");
+    assert_true(old_entry != NULL, "target tree should contain old.txt");
+    fanout[0] = old_entry->hash[0];
+    fanout[1] = old_entry->hash[1];
+    fanout[2] = '\0';
+    assert_result(fs_join_path(".minigit/objects", fanout, object_dir, sizeof(object_dir)), MG_OK, "object dir failed");
+    assert_result(fs_join_path(object_dir, old_entry->hash + 2, object_path, sizeof(object_path)), MG_OK, "object path failed");
+    assert_true(unlink(object_path) == 0, "remove target blob failed");
+    tree_free(&tree);
+    commit_free(&commit);
+
+    assert_result(mg_command_checkout(1, checkout_args), MG_NOT_FOUND, "checkout should fail before mutation");
+    read_text_file("keep.txt", &contents);
+    assert_true(strcmp(contents, "two\n") == 0, "failed checkout changed an existing file");
+    free(contents);
+    assert_true(!fs_exists("old.txt"), "failed checkout created a target-only file");
+    assert_result(repo_current_commit(&repo, target_hash, sizeof(target_hash)), MG_OK, "read HEAD after failure failed");
+    assert_true(strcmp(target_hash, current_hash) == 0, "failed checkout moved HEAD");
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_checkout_rolls_back_when_index_save_fails(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char target_hash[MG_HASH_HEX_SIZE];
+    char current_hash[MG_HASH_HEX_SIZE];
+    char *target_add_args[] = {"keep.txt", "nested/target.txt"};
+    char *target_commit_args[] = {"-m", "target"};
+    char *rm_args[] = {"nested/target.txt"};
+    char *current_add_args[] = {"keep.txt"};
+    char *current_commit_args[] = {"-m", "current"};
+    char *checkout_args[] = {target_hash};
+    char *contents;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_true(mkdir("nested", 0700) == 0, "mkdir nested failed");
+    assert_result(fs_write_file("keep.txt", (const unsigned char *)"target\n", 7), MG_OK,
+                  "write target keep failed");
+    assert_result(fs_write_file("nested/target.txt", (const unsigned char *)"target only\n", 12), MG_OK,
+                  "write target-only file failed");
+    assert_result(mg_command_add(2, target_add_args), MG_OK, "add target files failed");
+    assert_result(mg_command_commit(2, target_commit_args), MG_OK, "target commit failed");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(repo_current_commit(&repo, target_hash, sizeof(target_hash)), MG_OK, "target hash failed");
+
+    assert_result(mg_command_rm(1, rm_args), MG_OK, "remove target-only file failed");
+    assert_result(fs_write_file("keep.txt", (const unsigned char *)"current\n", 8), MG_OK,
+                  "write current keep failed");
+    assert_result(mg_command_add(1, current_add_args), MG_OK, "add current file failed");
+    assert_result(mg_command_commit(2, current_commit_args), MG_OK, "current commit failed");
+    assert_result(repo_current_commit(&repo, current_hash, sizeof(current_hash)), MG_OK, "current hash failed");
+
+    assert_true(chmod(".minigit", 0500) == 0, "make metadata directory read-only failed");
+    assert_result(mg_command_checkout(1, checkout_args), MG_IO_ERROR,
+                  "checkout should fail when the index cannot be replaced");
+    assert_true(chmod(".minigit", 0700) == 0, "restore metadata permissions failed");
+
+    read_text_file("keep.txt", &contents);
+    assert_true(strcmp(contents, "current\n") == 0, "failed checkout did not restore current contents");
+    free(contents);
+    assert_true(!fs_exists("nested/target.txt"), "failed checkout left a target-only file");
+    assert_true(!fs_exists("nested"), "failed checkout left an empty target-only directory");
+    assert_result(repo_current_commit(&repo, target_hash, sizeof(target_hash)), MG_OK, "HEAD read failed");
+    assert_true(strcmp(target_hash, current_hash) == 0, "failed checkout moved HEAD");
+    assert_result(index_load(&repo, &index), MG_OK, "index_load failed");
+    assert_true(index_find_const(&index, "keep.txt") != NULL, "rollback lost current index entry");
+    assert_true(index_find_const(&index, "nested/target.txt") == NULL, "rollback changed the index");
+    index_free(&index);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_restore_rolls_back_when_index_save_fails(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char commit_hash[MG_HASH_HEX_SIZE];
+    char before_hash[MG_HASH_HEX_SIZE];
+    char after_hash[MG_HASH_HEX_SIZE];
+    char *restore_args[] = {"file.txt"};
+    char *contents;
+
+    make_temp_dir(original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    commit_file("committed\n", "base", commit_hash);
+    assert_result(fs_write_file("file.txt", (const unsigned char *)"staged change\n", 14), MG_OK,
+                  "write staged change failed");
+    assert_result(mg_command_add(1, restore_args), MG_OK, "stage change failed");
+    assert_result(repo_open(&repo), MG_OK, "repo_open failed");
+    assert_result(index_load(&repo, &index), MG_OK, "index_load before restore failed");
+    assert_true(index_find_const(&index, "file.txt") != NULL, "file should be indexed");
+    strcpy(before_hash, index_find_const(&index, "file.txt")->hash);
+    index_free(&index);
+
+    assert_true(chmod(".minigit", 0500) == 0, "make metadata directory read-only failed");
+    assert_result(mg_command_restore(1, restore_args), MG_IO_ERROR,
+                  "restore should fail when the index cannot be replaced");
+    assert_true(chmod(".minigit", 0700) == 0, "restore metadata permissions failed");
+
+    read_text_file("file.txt", &contents);
+    assert_true(strcmp(contents, "staged change\n") == 0, "failed restore did not restore prior contents");
+    free(contents);
+    assert_result(index_load(&repo, &index), MG_OK, "index_load after restore failed");
+    assert_true(index_find_const(&index, "file.txt") != NULL, "failed restore lost index entry");
+    strcpy(after_hash, index_find_const(&index, "file.txt")->hash);
+    assert_true(strcmp(before_hash, after_hash) == 0, "failed restore changed the index");
+    index_free(&index);
+
+    cleanup_temp_dir(original_dir, temp_dir);
+    (void)commit_hash;
+}
+
 int main(void) {
     test_detached_checkout_restores_commit();
     test_checkout_refuses_dirty_tracked_file();
@@ -444,6 +625,10 @@ int main(void) {
     test_restore_rejects_path_missing_from_head();
     test_checkout_path_from_commit();
     test_checkout_path_missing_from_commit();
+    test_restore_rejects_external_symlink_target();
+    test_checkout_prevalidates_all_target_blobs();
+    test_checkout_rolls_back_when_index_save_fails();
+    test_restore_rolls_back_when_index_save_fails();
     puts("test_checkout passed");
     return 0;
 }

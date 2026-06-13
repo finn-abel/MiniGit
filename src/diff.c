@@ -3,6 +3,7 @@
 #include "diff.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -12,6 +13,8 @@
 #include "index.h"
 #include "object.h"
 #include "tree.h"
+
+#define MG_MAX_DIFF_LCS_CELLS ((size_t)8 * 1024 * 1024)
 
 /*
  * FileContent represents one side of a diff. Missing files keep exists false
@@ -140,12 +143,20 @@ static MGResult read_worktree_content(const Repository *repo, const char *path, 
     if (!fs_exists(full_path)) {
         return MG_OK;
     }
+    result = fs_validate_worktree_path(repo->worktree_path, path);
+    if (result == MG_CONFLICT) {
+        out->exists = 1;
+        return MG_OK;
+    }
+    if (result != MG_OK) {
+        return result;
+    }
     if (!fs_is_file(full_path)) {
         out->exists = 1;
         return MG_OK;
     }
 
-    result = fs_read_file(full_path, &out->data, &out->size);
+    result = fs_read_worktree_file(repo->worktree_path, path, &out->data, &out->size);
     if (result == MG_OK) {
         struct stat st;
         if (lstat(full_path, &st) != 0) {
@@ -288,6 +299,7 @@ static MGResult collect_paths(const Tree *head_tree, const Index *index, DiffMod
         for (size_t i = 0; i < head_tree->count; i++) {
             result = path_list_add(paths, head_tree->entries[i].path);
             if (result != MG_OK) {
+                path_list_free(paths);
                 return result;
             }
         }
@@ -296,6 +308,7 @@ static MGResult collect_paths(const Tree *head_tree, const Index *index, DiffMod
     for (size_t i = 0; i < index->count; i++) {
         result = path_list_add(paths, index->entries[i].path);
         if (result != MG_OK) {
+            path_list_free(paths);
             return result;
         }
     }
@@ -367,6 +380,9 @@ static MGResult split_lines(const FileContent *content, LineList *lines) {
         count++;
     }
 
+    if (count == 0 || count > SIZE_MAX / sizeof(lines->items[0])) {
+        return MG_ERROR;
+    }
     lines->items = malloc(count * sizeof(lines->items[0]));
     if (lines->items == NULL) {
         return MG_ERROR;
@@ -449,6 +465,12 @@ static MGResult print_line_diff(const char *path, const FileContent *old_content
 
     old_count = old_lines.count;
     new_count = new_lines.count;
+    if (old_count == SIZE_MAX || new_count == SIZE_MAX ||
+        old_count + 1 > MG_MAX_DIFF_LCS_CELLS / (new_count + 1)) {
+        line_list_free(&old_lines);
+        line_list_free(&new_lines);
+        return MG_ERROR;
+    }
     lcs = calloc((old_count + 1) * (new_count + 1), sizeof(lcs[0]));
     if (lcs == NULL) {
         line_list_free(&old_lines);

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "fs.h"
+#include "hash.h"
 
 #define MG_HEAD_REF_PREFIX "ref: "
 #define MG_MAIN_REF "refs/heads/main"
@@ -45,7 +46,7 @@ static MGResult copy_trimmed_text(const unsigned char *data, size_t size, char *
     char *buffer;
     size_t trimmed_size;
 
-    if (data == NULL || out == NULL || out_size == 0) {
+    if (data == NULL || out == NULL || out_size == 0 || memchr(data, '\0', size) != NULL) {
         return MG_INVALID_ARG;
     }
 
@@ -66,6 +67,45 @@ static MGResult copy_trimmed_text(const unsigned char *data, size_t size, char *
     memcpy(out, buffer, trimmed_size + 1);
     free(buffer);
     return MG_OK;
+}
+
+static MGResult head_branch_name(const char *head, const char **out_name) {
+    const char *ref_path;
+    const char *name;
+
+    if (head == NULL || strncmp(head, MG_HEAD_REF_PREFIX, strlen(MG_HEAD_REF_PREFIX)) != 0) {
+        return MG_NOT_FOUND;
+    }
+    ref_path = head + strlen(MG_HEAD_REF_PREFIX);
+    if (strncmp(ref_path, "refs/heads/", strlen("refs/heads/")) != 0) {
+        return MG_PARSE_ERROR;
+    }
+    name = ref_path + strlen("refs/heads/");
+    if (!repo_branch_name_is_valid(name)) {
+        return MG_PARSE_ERROR;
+    }
+    if (out_name != NULL) {
+        *out_name = name;
+    }
+    return MG_OK;
+}
+
+static MGResult validate_head_contents(const char *head) {
+    MGResult result = head_branch_name(head, NULL);
+    if (result == MG_OK) {
+        return MG_OK;
+    }
+    return result == MG_NOT_FOUND && hash_is_valid_hex(head) ? MG_OK : MG_PARSE_ERROR;
+}
+
+static MGResult validate_ref_hash(const char *hash, int allow_empty) {
+    if (hash == NULL || (hash[0] == '\0' && !allow_empty)) {
+        return MG_PARSE_ERROR;
+    }
+    if (hash[0] == '\0') {
+        return MG_OK;
+    }
+    return hash_is_valid_hex(hash) ? MG_OK : MG_PARSE_ERROR;
 }
 
 /*
@@ -107,9 +147,9 @@ MGResult repo_init(Repository *repo) {
     if (fs_mkdir_p(objects_path) != MG_OK || fs_mkdir_p(refs_heads_path) != MG_OK) {
         return MG_IO_ERROR;
     }
-    if (fs_write_file(head_path, head_contents, sizeof(head_contents) - 1) != MG_OK ||
-        fs_write_file(main_ref_path, (const unsigned char *)"", 0) != MG_OK ||
-        fs_write_file(index_path, (const unsigned char *)"", 0) != MG_OK) {
+    if (fs_write_file_atomic(head_path, head_contents, sizeof(head_contents) - 1) != MG_OK ||
+        fs_write_file_atomic(main_ref_path, (const unsigned char *)"", 0) != MG_OK ||
+        fs_write_file_atomic(index_path, (const unsigned char *)"", 0) != MG_OK) {
         return MG_IO_ERROR;
     }
 
@@ -155,7 +195,10 @@ MGResult repo_read_head(const Repository *repo, char *out, size_t out_size) {
     }
     result = copy_trimmed_text(data, size, out, out_size);
     free(data);
-    return result;
+    if (result != MG_OK) {
+        return result;
+    }
+    return validate_head_contents(out);
 }
 
 /*
@@ -163,14 +206,20 @@ MGResult repo_read_head(const Repository *repo, char *out, size_t out_size) {
  */
 MGResult repo_write_head(const Repository *repo, const char *contents) {
     char head_path[MG_MAX_PATH];
+    char normalized[MG_MAX_PATH];
 
     if (contents == NULL) {
         return MG_INVALID_ARG;
     }
-    if (repo_path(repo, "HEAD", head_path, sizeof(head_path)) != MG_OK) {
+    if (snprintf(normalized, sizeof(normalized), "%s", contents) >= (int)sizeof(normalized)) {
         return MG_INVALID_ARG;
     }
-    return fs_write_file(head_path, (const unsigned char *)contents, strlen(contents));
+    trim_trailing_newline(normalized);
+    if (validate_head_contents(normalized) != MG_OK ||
+        repo_path(repo, "HEAD", head_path, sizeof(head_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    return fs_write_file_atomic(head_path, (const unsigned char *)contents, strlen(contents));
 }
 
 /*
@@ -188,7 +237,6 @@ int repo_head_is_detached(const char *head_contents) {
  */
 MGResult repo_current_branch(const Repository *repo, char *out, size_t out_size) {
     char head[MG_MAX_PATH];
-    const char *ref_path;
     const char *branch_name;
 
     if (out == NULL || out_size == 0) {
@@ -197,13 +245,9 @@ MGResult repo_current_branch(const Repository *repo, char *out, size_t out_size)
     if (repo_read_head(repo, head, sizeof(head)) != MG_OK) {
         return MG_REPO_ERROR;
     }
-    if (repo_head_is_detached(head)) {
+    if (head_branch_name(head, &branch_name) != MG_OK) {
         return MG_NOT_FOUND;
     }
-
-    ref_path = head + strlen(MG_HEAD_REF_PREFIX);
-    branch_name = strrchr(ref_path, '/');
-    branch_name = branch_name == NULL ? ref_path : branch_name + 1;
     if (strlen(branch_name) >= out_size) {
         return MG_INVALID_ARG;
     }
@@ -217,6 +261,7 @@ MGResult repo_current_branch(const Repository *repo, char *out, size_t out_size)
  */
 MGResult repo_current_commit(const Repository *repo, char *out, size_t out_size) {
     char head[MG_MAX_PATH];
+    char refs_heads_path[MG_MAX_PATH];
     char ref_file_path[MG_MAX_PATH];
     unsigned char *data;
     size_t size;
@@ -237,7 +282,10 @@ MGResult repo_current_commit(const Repository *repo, char *out, size_t out_size)
         return MG_OK;
     }
 
-    if (repo_path(repo, head + strlen(MG_HEAD_REF_PREFIX), ref_file_path, sizeof(ref_file_path)) != MG_OK) {
+    const char *branch_name;
+    if (head_branch_name(head, &branch_name) != MG_OK ||
+        repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK ||
+        fs_join_path(refs_heads_path, branch_name, ref_file_path, sizeof(ref_file_path)) != MG_OK) {
         return MG_INVALID_ARG;
     }
     if (fs_read_file(ref_file_path, &data, &size) != MG_OK) {
@@ -245,7 +293,10 @@ MGResult repo_current_commit(const Repository *repo, char *out, size_t out_size)
     }
     result = copy_trimmed_text(data, size, out, out_size);
     free(data);
-    return result;
+    if (result != MG_OK) {
+        return result;
+    }
+    return validate_ref_hash(out, 1);
 }
 
 /*
@@ -257,7 +308,7 @@ MGResult repo_update_current_ref(const Repository *repo, const char *commit_hash
     char contents[MG_HASH_HEX_SIZE + 1];
     int written;
 
-    if (commit_hash == NULL) {
+    if (validate_ref_hash(commit_hash, 0) != MG_OK) {
         return MG_INVALID_ARG;
     }
     written = snprintf(contents, sizeof(contents), "%s\n", commit_hash);
@@ -273,10 +324,14 @@ MGResult repo_update_current_ref(const Repository *repo, const char *commit_hash
         return repo_write_head(repo, contents);
     }
 
-    if (repo_path(repo, head + strlen(MG_HEAD_REF_PREFIX), target_path, sizeof(target_path)) != MG_OK) {
+    const char *branch_name;
+    char refs_heads_path[MG_MAX_PATH];
+    if (head_branch_name(head, &branch_name) != MG_OK ||
+        repo_path(repo, "refs/heads", refs_heads_path, sizeof(refs_heads_path)) != MG_OK ||
+        fs_join_path(refs_heads_path, branch_name, target_path, sizeof(target_path)) != MG_OK) {
         return MG_INVALID_ARG;
     }
-    return fs_write_file(target_path, (const unsigned char *)contents, strlen(contents));
+    return fs_write_file_atomic(target_path, (const unsigned char *)contents, strlen(contents));
 }
 
 /*
@@ -395,7 +450,7 @@ MGResult repo_create_branch(const Repository *repo, const char *name) {
         return MG_INVALID_ARG;
     }
 
-    return fs_write_file(branch_path, (const unsigned char *)contents, strlen(contents));
+    return fs_write_file_atomic(branch_path, (const unsigned char *)contents, strlen(contents));
 }
 
 /*
@@ -585,7 +640,10 @@ MGResult repo_read_branch_commit(const Repository *repo, const char *name, char 
 
     result = copy_trimmed_text(data, size, out, out_size);
     free(data);
-    return result;
+    if (result != MG_OK) {
+        return result;
+    }
+    return validate_ref_hash(out, 1);
 }
 
 /*

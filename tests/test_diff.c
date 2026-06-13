@@ -26,6 +26,16 @@ static void assert_contains(const char *haystack, const char *needle, const char
     }
 }
 
+static void assert_before(const char *text, const char *first, const char *second, const char *message) {
+    const char *first_position = strstr(text, first);
+    const char *second_position = strstr(text, second);
+
+    if (first_position == NULL || second_position == NULL || first_position >= second_position) {
+        fprintf(stderr, "%s\noutput:\n%s\n", message, text);
+        exit(1);
+    }
+}
+
 static void remove_recursive(const char *path) {
     struct stat st;
 
@@ -199,9 +209,70 @@ static void test_diff_mode_change(void) {
     cleanup_temp_dir(original_dir, temp_dir);
 }
 
+static void test_diff_rejects_excessive_lcs_matrix(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"large.txt"};
+    char *commit_args[] = {"-m", "large"};
+    unsigned char *old_data;
+    unsigned char *new_data;
+    size_t lines = 3000;
+    size_t size = lines * 2;
+
+    old_data = malloc(size);
+    new_data = malloc(size);
+    if (old_data == NULL || new_data == NULL) {
+        fprintf(stderr, "large diff allocation failed\n");
+        exit(1);
+    }
+    for (size_t i = 0; i < lines; i++) {
+        old_data[i * 2] = 'x';
+        old_data[i * 2 + 1] = '\n';
+        new_data[i * 2] = 'y';
+        new_data[i * 2 + 1] = '\n';
+    }
+
+    make_temp_dir("diff_limit", original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("large.txt", old_data, size), MG_OK, "write old large file failed");
+    assert_result(mg_command_add(1, add_args), MG_OK, "add large file failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit large file failed");
+    assert_result(fs_write_file("large.txt", new_data, size), MG_OK, "write new large file failed");
+    assert_result(mg_command_diff(0, NULL), MG_ERROR, "large diff should refuse excessive memory use");
+
+    free(old_data);
+    free(new_data);
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
+static void test_diff_sorts_multiple_paths(void) {
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    char *add_args[] = {"z.txt", "a.txt"};
+    char *commit_args[] = {"-m", "two files"};
+    char *output;
+
+    make_temp_dir("diff_sort", original_dir, temp_dir);
+    assert_result(mg_command_init(0, NULL), MG_OK, "init failed");
+    assert_result(fs_write_file("z.txt", (const unsigned char *)"old z\n", 6), MG_OK, "write z failed");
+    assert_result(fs_write_file("a.txt", (const unsigned char *)"old a\n", 6), MG_OK, "write a failed");
+    assert_result(mg_command_add(2, add_args), MG_OK, "add files failed");
+    assert_result(mg_command_commit(2, commit_args), MG_OK, "commit failed");
+    assert_result(fs_write_file("z.txt", (const unsigned char *)"new z\n", 6), MG_OK, "modify z failed");
+    assert_result(fs_write_file("a.txt", (const unsigned char *)"new a\n", 6), MG_OK, "modify a failed");
+
+    output = capture_diff(0, NULL);
+    assert_before(output, "diff --minigit a.txt\n", "diff --minigit z.txt\n",
+                  "multi-file diff output should be sorted by path");
+    free(output);
+    cleanup_temp_dir(original_dir, temp_dir);
+}
+
 int main(void) {
     test_diff_modes();
     test_diff_mode_change();
+    test_diff_rejects_excessive_lcs_matrix();
+    test_diff_sorts_multiple_paths();
     puts("All diff tests passed.");
     return 0;
 }

@@ -52,6 +52,11 @@ static MGResult hash_list_add(HashList *list, const char *hash) {
     if (list == NULL || !hash_is_valid_hex(hash)) {
         return MG_INVALID_ARG;
     }
+    for (size_t i = 0; i < list->count; i++) {
+        if (strcmp(list->items[i], hash) == 0) {
+            return MG_OK;
+        }
+    }
     if (list->count == list->capacity) {
         capacity = list->capacity == 0 ? 8 : list->capacity * 2;
         grown = realloc(list->items, capacity * sizeof(list->items[0]));
@@ -236,26 +241,30 @@ static MGResult read_commit_tree(const Repository *repo, const char *commit_hash
  * collect_ancestors walks first-parent history from one commit back to the root.
  */
 static MGResult collect_ancestors(const Repository *repo, const char *start_hash, HashList *ancestors) {
-    char current[MG_HASH_HEX_SIZE];
     MGResult result;
 
     hash_list_init(ancestors);
-    strcpy(current, start_hash);
-    while (current[0] != '\0') {
+    result = hash_list_add(ancestors, start_hash);
+    if (result != MG_OK) {
+        return result;
+    }
+    for (size_t i = 0; i < ancestors->count; i++) {
         Commit commit;
-        char parent[MG_HASH_HEX_SIZE];
 
-        result = hash_list_add(ancestors, current);
+        result = commit_read(repo, ancestors->items[i], &commit);
         if (result != MG_OK) {
             return result;
         }
-        result = commit_read(repo, current, &commit);
-        if (result != MG_OK) {
-            return result;
+        if (commit.parent_hash[0] != '\0') {
+            result = hash_list_add(ancestors, commit.parent_hash);
         }
-        strcpy(parent, commit.parent_hash);
+        if (result == MG_OK && commit.second_parent_hash[0] != '\0') {
+            result = hash_list_add(ancestors, commit.second_parent_hash);
+        }
         commit_free(&commit);
-        strcpy(current, parent);
+        if (result != MG_OK) {
+            return result;
+        }
     }
     return MG_OK;
 }
@@ -271,7 +280,7 @@ static MGResult find_merge_base(
     char out_hash[MG_HASH_HEX_SIZE]
 ) {
     HashList ours_ancestors;
-    char current[MG_HASH_HEX_SIZE];
+    HashList theirs_ancestors;
     MGResult result;
 
     out_hash[0] = '\0';
@@ -281,28 +290,23 @@ static MGResult find_merge_base(
         return result;
     }
 
-    strcpy(current, theirs_hash);
-    while (current[0] != '\0') {
-        Commit commit;
-        char parent[MG_HASH_HEX_SIZE];
-
-        if (hash_list_contains(&ours_ancestors, current)) {
-            strcpy(out_hash, current);
+    result = collect_ancestors(repo, theirs_hash, &theirs_ancestors);
+    if (result != MG_OK) {
+        hash_list_free(&ours_ancestors);
+        hash_list_free(&theirs_ancestors);
+        return result;
+    }
+    for (size_t i = 0; i < theirs_ancestors.count; i++) {
+        if (hash_list_contains(&ours_ancestors, theirs_ancestors.items[i])) {
+            strcpy(out_hash, theirs_ancestors.items[i]);
             hash_list_free(&ours_ancestors);
+            hash_list_free(&theirs_ancestors);
             return MG_OK;
         }
-
-        result = commit_read(repo, current, &commit);
-        if (result != MG_OK) {
-            hash_list_free(&ours_ancestors);
-            return result;
-        }
-        strcpy(parent, commit.parent_hash);
-        commit_free(&commit);
-        strcpy(current, parent);
     }
 
     hash_list_free(&ours_ancestors);
+    hash_list_free(&theirs_ancestors);
     return MG_NOT_FOUND;
 }
 
@@ -320,7 +324,7 @@ static MGResult blob_hash_from_file(const Repository *repo, const char *relative
         return MG_INVALID_ARG;
     }
 
-    result = fs_read_file(full_path, &file_data, &file_size);
+    result = fs_read_worktree_file(repo->worktree_path, relative_path, &file_data, &file_size);
     if (result != MG_OK) {
         return result;
     }
@@ -343,13 +347,14 @@ static MGResult ensure_clean_worktree(const Repository *repo, const Tree *head_t
     for (size_t i = 0; i < index->count; i++) {
         const IndexEntry *entry = &index->entries[i];
         head_entry = tree_find_entry(head_tree, entry->path);
-        if (head_entry == NULL || strcmp(head_entry->hash, entry->hash) != 0) {
+        if (head_entry == NULL || strcmp(head_entry->hash, entry->hash) != 0 || head_entry->mode != entry->mode) {
             return MG_CONFLICT;
         }
         if (fs_join_path(repo->worktree_path, entry->path, full_path, sizeof(full_path)) != MG_OK) {
             return MG_INVALID_ARG;
         }
-        if (!fs_is_file(full_path)) {
+        result = fs_validate_worktree_path(repo->worktree_path, entry->path);
+        if (result != MG_OK || !fs_is_file(full_path)) {
             return MG_CONFLICT;
         }
         struct stat st;
@@ -415,17 +420,7 @@ static MGResult read_blob_payload(const Repository *repo, const TreeEntry *entry
  * write_file_content writes bytes to a repo-relative path, creating parents first.
  */
 static MGResult write_file_content(const Repository *repo, const char *path, const unsigned char *data, size_t size) {
-    char full_path[MG_MAX_PATH];
-    char parent_path[MG_MAX_PATH];
-
-    if (fs_join_path(repo->worktree_path, path, full_path, sizeof(full_path)) != MG_OK ||
-        fs_parent_dir(full_path, parent_path, sizeof(parent_path)) != MG_OK) {
-        return MG_INVALID_ARG;
-    }
-    if (strcmp(parent_path, ".") != 0 && fs_mkdir_p(parent_path) != MG_OK) {
-        return MG_IO_ERROR;
-    }
-    return fs_write_file(full_path, data, size);
+    return fs_write_worktree_file(repo->worktree_path, path, data, size);
 }
 
 /*
@@ -469,8 +464,11 @@ static MGResult apply_delete(const Repository *repo, Index *index, const char *p
     if (fs_join_path(repo->worktree_path, path, full_path, sizeof(full_path)) != MG_OK) {
         return MG_INVALID_ARG;
     }
-    if (fs_exists(full_path) && fs_is_file(full_path) && fs_remove_file(full_path) != MG_OK) {
-        return MG_IO_ERROR;
+    if (fs_exists(full_path)) {
+        result = fs_remove_worktree_file(repo->worktree_path, path);
+        if (result != MG_OK) {
+            return result;
+        }
     }
     result = index_remove(index, path);
     return result == MG_NOT_FOUND ? MG_OK : result;
@@ -551,6 +549,43 @@ static MGResult write_conflict_file(
     return result;
 }
 
+static MGResult ensure_merge_write_is_safe(const Repository *repo, const Index *index, const char *path) {
+    char prefix[MG_MAX_PATH];
+    char full_path[MG_MAX_PATH];
+    size_t prefix_len = 0;
+    struct stat st;
+
+    if (index_find_const(index, path) != NULL) {
+        return MG_OK;
+    }
+    if (!fs_repo_relative_path_is_valid(path)) {
+        return MG_PARSE_ERROR;
+    }
+
+    for (size_t i = 0; path[i] != '\0'; i++) {
+        if (path[i] != '/') {
+            prefix[prefix_len++] = path[i];
+            continue;
+        }
+        prefix[prefix_len] = '\0';
+        if (fs_join_path(repo->worktree_path, prefix, full_path, sizeof(full_path)) != MG_OK) {
+            return MG_INVALID_ARG;
+        }
+        if (lstat(full_path, &st) == 0 && !S_ISDIR(st.st_mode)) {
+            return MG_CONFLICT;
+        }
+        prefix[prefix_len++] = '/';
+    }
+
+    if (fs_join_path(repo->worktree_path, path, full_path, sizeof(full_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (lstat(full_path, &st) == 0) {
+        return MG_CONFLICT;
+    }
+    return MG_OK;
+}
+
 /*
  * apply_merge_trees handles the core three-way file decisions:
  * same as theirs => keep ours; same as ours => take theirs; otherwise conflict.
@@ -572,6 +607,25 @@ static MGResult apply_merge_trees(
     if (result != MG_OK) {
         path_list_free(&paths);
         return result;
+    }
+
+    for (size_t i = 0; i < paths.count; i++) {
+        const char *path = paths.items[i];
+        const TreeEntry *base_entry = tree_find_entry(base_tree, path);
+        const TreeEntry *ours_entry = tree_find_entry(ours_tree, path);
+        const TreeEntry *theirs_entry = tree_find_entry(theirs_tree, path);
+        int writes_path = 0;
+
+        if (!tree_entry_same(ours_entry, theirs_entry) && !tree_entry_same(base_entry, theirs_entry)) {
+            writes_path = tree_entry_same(base_entry, ours_entry) ? theirs_entry != NULL : 1;
+        }
+        if (writes_path) {
+            result = ensure_merge_write_is_safe(repo, index, path);
+            if (result != MG_OK) {
+                path_list_free(&paths);
+                return result;
+            }
+        }
     }
 
     for (size_t i = 0; i < paths.count; i++) {
@@ -617,6 +671,9 @@ MGResult merge_branch(const Repository *repo, const char *branch_name) {
     Tree theirs_tree;
     Index index;
     int conflicts = 0;
+    char merge_tree_hash[MG_HASH_HEX_SIZE];
+    char merge_commit_hash[MG_HASH_HEX_SIZE];
+    char merge_message[MG_MAX_BRANCH + 32];
     MGResult result;
 
     if (repo == NULL || !repo_branch_name_is_valid(branch_name)) {
@@ -675,6 +732,9 @@ MGResult merge_branch(const Repository *repo, const char *branch_name) {
         result = checkout_commit(repo, theirs_hash, 0);
         if (result == MG_OK) {
             result = repo_update_current_ref(repo, theirs_hash);
+            if (result != MG_OK) {
+                (void)checkout_commit(repo, ours_hash, 0);
+            }
         }
         return result;
     }
@@ -696,6 +756,36 @@ MGResult merge_branch(const Repository *repo, const char *branch_name) {
     result = apply_merge_trees(repo, branch_name, &base_tree, &ours_tree, &theirs_tree, &index, &conflicts);
     if (result == MG_OK && !conflicts) {
         result = index_save(repo, &index);
+        if (result == MG_OK) {
+            Tree merge_tree;
+            result = tree_from_index(&index, &merge_tree);
+            if (result == MG_OK) {
+                result = tree_write(repo, &merge_tree, merge_tree_hash);
+                tree_free(&merge_tree);
+            }
+        }
+        if (result == MG_OK) {
+            int written = snprintf(merge_message, sizeof(merge_message), "Merge branch %s", branch_name);
+            if (written < 0 || (size_t)written >= sizeof(merge_message)) {
+                result = MG_INVALID_ARG;
+            }
+        }
+        if (result == MG_OK) {
+            result = commit_create_merge(
+                repo,
+                merge_tree_hash,
+                ours_hash,
+                theirs_hash,
+                merge_message,
+                merge_commit_hash
+            );
+        }
+        if (result == MG_OK) {
+            result = repo_update_current_ref(repo, merge_commit_hash);
+            if (result != MG_OK) {
+                (void)checkout_commit(repo, ours_hash, 0);
+            }
+        }
     } else if (result == MG_OK) {
         (void)index_save(repo, &index);
         result = MG_CONFLICT;

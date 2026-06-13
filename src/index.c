@@ -3,6 +3,8 @@
 #include "index.h"
 
 #include <errno.h>
+#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +38,21 @@ static void index_sort(Index *index) {
     if (index != NULL && index->count > 1) {
         qsort(index->entries, index->count, sizeof(index->entries[0]), compare_entries);
     }
+}
+
+static int paths_conflict(const char *left, const char *right) {
+    size_t left_len = strlen(left);
+    return strcmp(left, right) == 0 ||
+           (left_len < strlen(right) && strncmp(left, right, left_len) == 0 && right[left_len] == '/');
+}
+
+static MGResult index_validate_paths(const Index *index) {
+    for (size_t i = 1; i < index->count; i++) {
+        if (paths_conflict(index->entries[i - 1].path, index->entries[i].path)) {
+            return MG_PARSE_ERROR;
+        }
+    }
+    return MG_OK;
 }
 
 /*
@@ -76,15 +93,15 @@ static MGResult ensure_capacity(Index *index, size_t needed) {
  */
 static MGResult parse_size_field(const char *value, size_t *out) {
     char *end = NULL;
-    unsigned long parsed;
+    uintmax_t parsed;
 
     if (value == NULL || value[0] == '\0' || out == NULL) {
         return MG_PARSE_ERROR;
     }
 
     errno = 0;
-    parsed = strtoul(value, &end, 10);
-    if (errno != 0 || *end != '\0') {
+    parsed = strtoumax(value, &end, 10);
+    if (errno != 0 || *end != '\0' || parsed > SIZE_MAX) {
         return MG_PARSE_ERROR;
     }
 
@@ -99,19 +116,21 @@ static MGResult parse_size_field(const char *value, size_t *out) {
  */
 static MGResult parse_mtime_field(const char *value, time_t *out) {
     char *end = NULL;
-    long parsed;
+    uintmax_t parsed;
+    time_t converted;
 
     if (value == NULL || value[0] == '\0' || out == NULL) {
         return MG_PARSE_ERROR;
     }
 
     errno = 0;
-    parsed = strtol(value, &end, 10);
-    if (errno != 0 || *end != '\0' || parsed < 0) {
+    parsed = strtoumax(value, &end, 10);
+    converted = (time_t)parsed;
+    if (errno != 0 || *end != '\0' || converted < 0 || (uintmax_t)converted != parsed) {
         return MG_PARSE_ERROR;
     }
 
-    *out = (time_t)parsed;
+    *out = converted;
     return MG_OK;
 }
 
@@ -171,7 +190,10 @@ static MGResult parse_index_line(Index *index, char *line) {
         return MG_PARSE_ERROR;
     }
 
-    return index_add_or_update(index, path, hash, parsed_mode, size, mtime);
+    {
+        MGResult result = index_add_or_update(index, path, hash, parsed_mode, size, mtime);
+        return result == MG_INVALID_ARG ? MG_PARSE_ERROR : result;
+    }
 }
 
 /*
@@ -262,7 +284,11 @@ MGResult index_load(const Repository *repo, Index *index) {
         return result;
     }
     index_sort(index);
-    return MG_OK;
+    result = index_validate_paths(index);
+    if (result != MG_OK) {
+        index_free(index);
+    }
+    return result;
 }
 
 /*
@@ -325,7 +351,7 @@ MGResult index_save(const Repository *repo, const Index *index) {
     }
 
     data[total_size] = '\0';
-    MGResult result = fs_write_file(path, data, total_size);
+    MGResult result = fs_write_file_atomic(path, data, total_size);
     free(data);
     return result;
 }
@@ -344,14 +370,21 @@ MGResult index_add_or_update(
 ) {
     IndexEntry *existing;
     IndexEntry entry;
+    IndexEntry previous;
+    int had_existing;
 
-    if (index == NULL || path == NULL || hash == NULL || path[0] == '\0' ||
-        strlen(path) >= sizeof(entry.path) || !hash_is_valid_hex(hash) || !mode_is_supported(mode)) {
+    if (index == NULL || path == NULL || hash == NULL ||
+        !fs_repo_relative_path_is_valid(path) || strlen(path) >= sizeof(entry.path) ||
+        !hash_is_valid_hex(hash) || !mode_is_supported(mode)) {
         return MG_INVALID_ARG;
     }
 
     /* Build a complete entry first so update and insert share validation. */
     existing = index_find(index, path);
+    had_existing = existing != NULL;
+    if (had_existing) {
+        previous = *existing;
+    }
     memset(&entry, 0, sizeof(entry));
     strcpy(entry.path, path);
     strcpy(entry.hash, hash);
@@ -369,6 +402,18 @@ MGResult index_add_or_update(
     }
 
     index_sort(index);
+    if (index_validate_paths(index) != MG_OK) {
+        if (had_existing) {
+            existing = index_find(index, path);
+            if (existing != NULL) {
+                *existing = previous;
+                index_sort(index);
+            }
+        } else {
+            (void)index_remove(index, path);
+        }
+        return MG_INVALID_ARG;
+    }
     return MG_OK;
 }
 

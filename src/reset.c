@@ -55,6 +55,9 @@ static time_t current_mtime(const Repository *repo, const char *relative_path) {
     if (fs_join_path(repo->worktree_path, relative_path, full_path, sizeof(full_path)) != MG_OK) {
         return 0;
     }
+    if (fs_validate_worktree_path(repo->worktree_path, relative_path) != MG_OK) {
+        return 0;
+    }
     if (lstat(full_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         return 0;
     }

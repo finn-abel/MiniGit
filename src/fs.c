@@ -4,6 +4,8 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,6 +152,10 @@ MGResult fs_read_file(const char *path, unsigned char **out_data, size_t *out_si
     }
 
     size = (size_t)end;
+    if (size == SIZE_MAX) {
+        fclose(file);
+        return MG_ERROR;
+    }
     data = malloc(size + 1);
     if (data == NULL) {
         fclose(file);
@@ -194,6 +200,46 @@ MGResult fs_write_file(const char *path, const unsigned char *data, size_t size)
         return MG_IO_ERROR;
     }
 
+    return MG_OK;
+}
+
+MGResult fs_write_file_atomic(const char *path, const unsigned char *data, size_t size) {
+    char temp_path[MG_MAX_PATH];
+    int fd;
+    FILE *file;
+    int written;
+
+    if (path == NULL || (data == NULL && size > 0)) {
+        return MG_INVALID_ARG;
+    }
+    written = snprintf(temp_path, sizeof(temp_path), "%s.tmp.XXXXXX", path);
+    if (written < 0 || (size_t)written >= sizeof(temp_path)) {
+        return MG_INVALID_ARG;
+    }
+
+    fd = mkstemp(temp_path);
+    if (fd < 0) {
+        return MG_IO_ERROR;
+    }
+    file = fdopen(fd, "wb");
+    if (file == NULL) {
+        close(fd);
+        (void)unlink(temp_path);
+        return MG_IO_ERROR;
+    }
+    if ((size > 0 && fwrite(data, 1, size, file) != size) || fflush(file) != 0 || fsync(fd) != 0) {
+        fclose(file);
+        (void)unlink(temp_path);
+        return MG_IO_ERROR;
+    }
+    if (fclose(file) != 0) {
+        (void)unlink(temp_path);
+        return MG_IO_ERROR;
+    }
+    if (rename(temp_path, path) != 0) {
+        (void)unlink(temp_path);
+        return MG_IO_ERROR;
+    }
     return MG_OK;
 }
 
@@ -287,6 +333,34 @@ static int path_has_forbidden_segment(const char *path) {
     return 0;
 }
 
+int fs_repo_relative_path_is_valid(const char *path) {
+    const char *segment;
+
+    if (path == NULL || path[0] == '\0' || path[0] == '/' || strlen(path) >= MG_MAX_PATH) {
+        return 0;
+    }
+    if (strchr(path, '\n') != NULL || strchr(path, '\r') != NULL || strchr(path, '\t') != NULL) {
+        return 0;
+    }
+
+    segment = path;
+    while (*segment != '\0') {
+        const char *end = strchr(segment, '/');
+        size_t len = end == NULL ? strlen(segment) : (size_t)(end - segment);
+
+        if (len == 0 || (len == 1 && segment[0] == '.') ||
+            (len == 2 && strncmp(segment, "..", len) == 0) ||
+            (len == 8 && strncmp(segment, ".minigit", len) == 0)) {
+            return 0;
+        }
+        if (end == NULL) {
+            break;
+        }
+        segment = end + 1;
+    }
+    return 1;
+}
+
 /*
  * fs_repo_relative_path converts user input to a stable repo-relative path.
  */
@@ -326,7 +400,133 @@ MGResult fs_repo_relative_path(const char *repo_root, const char *path, char *ou
     }
 
     memcpy(out, relative, len + 1);
+    if (out[0] != '\0' && !fs_repo_relative_path_is_valid(out)) {
+        return MG_INVALID_ARG;
+    }
     return MG_OK;
+}
+
+MGResult fs_validate_worktree_path(const char *repo_root, const char *relative_path) {
+    char current[MG_MAX_PATH];
+    const char *segment;
+    size_t current_len;
+
+    if (repo_root == NULL || !fs_repo_relative_path_is_valid(relative_path)) {
+        return MG_INVALID_ARG;
+    }
+    if (snprintf(current, sizeof(current), "%s", repo_root) >= (int)sizeof(current)) {
+        return MG_INVALID_ARG;
+    }
+    current_len = strlen(current);
+    segment = relative_path;
+
+    while (*segment != '\0') {
+        const char *end = strchr(segment, '/');
+        size_t len = end == NULL ? strlen(segment) : (size_t)(end - segment);
+        struct stat st;
+
+        if (current_len + 1 + len >= sizeof(current)) {
+            return MG_INVALID_ARG;
+        }
+        current[current_len++] = '/';
+        memcpy(current + current_len, segment, len);
+        current_len += len;
+        current[current_len] = '\0';
+
+        if (lstat(current, &st) != 0) {
+            if (errno == ENOENT) {
+                return MG_OK;
+            }
+            return MG_IO_ERROR;
+        }
+        if (S_ISLNK(st.st_mode)) {
+            return MG_CONFLICT;
+        }
+        if (end != NULL && !S_ISDIR(st.st_mode)) {
+            return MG_CONFLICT;
+        }
+        if (end == NULL) {
+            break;
+        }
+        segment = end + 1;
+    }
+    return MG_OK;
+}
+
+MGResult fs_read_worktree_file(
+    const char *repo_root,
+    const char *relative_path,
+    unsigned char **out_data,
+    size_t *out_size
+) {
+    char full_path[MG_MAX_PATH];
+    struct stat st;
+    MGResult result;
+
+    result = fs_validate_worktree_path(repo_root, relative_path);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (fs_join_path(repo_root, relative_path, full_path, sizeof(full_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (lstat(full_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return MG_IO_ERROR;
+    }
+    return fs_read_file(full_path, out_data, out_size);
+}
+
+MGResult fs_write_worktree_file(
+    const char *repo_root,
+    const char *relative_path,
+    const unsigned char *data,
+    size_t size
+) {
+    char full_path[MG_MAX_PATH];
+    char parent_path[MG_MAX_PATH];
+    struct stat st;
+    MGResult result;
+
+    result = fs_validate_worktree_path(repo_root, relative_path);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (fs_join_path(repo_root, relative_path, full_path, sizeof(full_path)) != MG_OK ||
+        fs_parent_dir(full_path, parent_path, sizeof(parent_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (fs_mkdir_p(parent_path) != MG_OK) {
+        return MG_IO_ERROR;
+    }
+    result = fs_validate_worktree_path(repo_root, relative_path);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (lstat(full_path, &st) == 0 && !S_ISREG(st.st_mode)) {
+        return MG_CONFLICT;
+    }
+    return fs_write_file_atomic(full_path, data, size);
+}
+
+MGResult fs_remove_worktree_file(const char *repo_root, const char *relative_path) {
+    char full_path[MG_MAX_PATH];
+    struct stat st;
+    MGResult result;
+
+    result = fs_validate_worktree_path(repo_root, relative_path);
+    if (result != MG_OK) {
+        return result;
+    }
+    if (fs_join_path(repo_root, relative_path, full_path, sizeof(full_path)) != MG_OK) {
+        return MG_INVALID_ARG;
+    }
+    if (lstat(full_path, &st) != 0) {
+        return errno == ENOENT ? MG_NOT_FOUND : MG_IO_ERROR;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return MG_CONFLICT;
+    }
+    return fs_remove_file(full_path);
 }
 
 /*

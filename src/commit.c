@@ -2,6 +2,8 @@
 
 #include "commit.h"
 
+#include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,18 +127,21 @@ static MGResult parse_author_line(Commit *commit, const char *line) {
  */
 static MGResult parse_timestamp(const char *text, time_t *out_timestamp) {
     char *end = NULL;
-    long parsed;
+    uintmax_t parsed;
+    time_t converted;
 
     if (text == NULL || text[0] == '\0' || out_timestamp == NULL) {
         return MG_PARSE_ERROR;
     }
 
-    parsed = strtol(text, &end, 10);
-    if (*end != '\0' || parsed < 0) {
+    errno = 0;
+    parsed = strtoumax(text, &end, 10);
+    converted = (time_t)parsed;
+    if (errno != 0 || *end != '\0' || converted < 0 || (uintmax_t)converted != parsed) {
         return MG_PARSE_ERROR;
     }
 
-    *out_timestamp = (time_t)parsed;
+    *out_timestamp = converted;
     return MG_OK;
 }
 
@@ -192,7 +197,7 @@ static char *next_line(char **cursor) {
 
 /*
  * parse_commit_payload validates the commit wire format line by line.
- * Valid order is tree, optional parent, optional author, timestamp, message, then EOF.
+ * Valid order is tree, up to two parents, optional author, timestamp, message, then EOF.
  */
 static MGResult parse_commit_payload(const unsigned char *payload, size_t size, Commit *commit) {
     char *buffer;
@@ -217,7 +222,7 @@ static MGResult parse_commit_payload(const unsigned char *payload, size_t size, 
 
     /* First line is always the tree reference. */
     cursor = buffer;
-    /* Parent is present for normal commits and omitted for the first commit. */
+    /* Parents are present for normal/merge commits and omitted for the first commit. */
     line = next_line(&cursor);
     if (line == NULL || strncmp(line, "tree ", 5) != 0 || !hash_is_valid_hex(line + 5)) {
         goto done;
@@ -231,8 +236,16 @@ static MGResult parse_commit_payload(const unsigned char *payload, size_t size, 
         }
         strcpy(commit->parent_hash, line + 7);
         line = next_line(&cursor);
+        if (line != NULL && strncmp(line, "parent ", 7) == 0) {
+            if (!hash_is_valid_hex(line + 7)) {
+                goto done;
+            }
+            strcpy(commit->second_parent_hash, line + 7);
+            line = next_line(&cursor);
+        }
     } else {
         commit->parent_hash[0] = '\0';
+        commit->second_parent_hash[0] = '\0';
     }
 
     if (line != NULL && strncmp(line, "author ", 7) == 0) {
@@ -272,10 +285,11 @@ done:
     return result;
 }
 
-MGResult commit_create(
+static MGResult commit_create_with_parents(
     const Repository *repo,
     const char *tree_hash,
     const char *parent_hash,
+    const char *second_parent_hash,
     const char *message,
     char out_hash[MG_HASH_HEX_SIZE]
 ) {
@@ -297,6 +311,10 @@ MGResult commit_create(
         return MG_INVALID_ARG;
     }
     if (parent_hash != NULL && parent_hash[0] != '\0' && !hash_is_valid_hex(parent_hash)) {
+        return MG_INVALID_ARG;
+    }
+    if (second_parent_hash != NULL && second_parent_hash[0] != '\0' &&
+        ((parent_hash == NULL || parent_hash[0] == '\0') || !hash_is_valid_hex(second_parent_hash))) {
         return MG_INVALID_ARG;
     }
     author_name = author_env_or_default("MINIGIT_AUTHOR_NAME", MG_DEFAULT_AUTHOR_NAME);
@@ -321,7 +339,20 @@ MGResult commit_create(
     }
 
     /* First pass calculates the exact payload size for either commit shape. */
-    if (parent_hash != NULL && parent_hash[0] != '\0') {
+    if (second_parent_hash != NULL && second_parent_hash[0] != '\0') {
+        payload_size = snprintf(
+            NULL,
+            0,
+            "tree %s\nparent %s\nparent %s\nauthor %s <%s>\ntimestamp %s\nmessage %s\n",
+            tree_hash,
+            parent_hash,
+            second_parent_hash,
+            author_name,
+            author_email,
+            timestamp_text,
+            message
+        );
+    } else if (parent_hash != NULL && parent_hash[0] != '\0') {
         payload_size = snprintf(
             NULL,
             0,
@@ -355,7 +386,20 @@ MGResult commit_create(
     }
 
     /* Second pass writes the canonical commit payload. */
-    if (parent_hash != NULL && parent_hash[0] != '\0') {
+    if (second_parent_hash != NULL && second_parent_hash[0] != '\0') {
+        snprintf(
+            (char *)payload,
+            (size_t)payload_size + 1,
+            "tree %s\nparent %s\nparent %s\nauthor %s <%s>\ntimestamp %s\nmessage %s\n",
+            tree_hash,
+            parent_hash,
+            second_parent_hash,
+            author_name,
+            author_email,
+            timestamp_text,
+            message
+        );
+    } else if (parent_hash != NULL && parent_hash[0] != '\0') {
         snprintf(
             (char *)payload,
             (size_t)payload_size + 1,
@@ -383,6 +427,34 @@ MGResult commit_create(
     result = object_write(repo, "commit", payload, (size_t)payload_size, out_hash);
     free(payload);
     return result;
+}
+
+MGResult commit_create(
+    const Repository *repo,
+    const char *tree_hash,
+    const char *parent_hash,
+    const char *message,
+    char out_hash[MG_HASH_HEX_SIZE]
+) {
+    return commit_create_with_parents(repo, tree_hash, parent_hash, "", message, out_hash);
+}
+
+MGResult commit_create_merge(
+    const Repository *repo,
+    const char *tree_hash,
+    const char *first_parent_hash,
+    const char *second_parent_hash,
+    const char *message,
+    char out_hash[MG_HASH_HEX_SIZE]
+) {
+    return commit_create_with_parents(
+        repo,
+        tree_hash,
+        first_parent_hash,
+        second_parent_hash,
+        message,
+        out_hash
+    );
 }
 
 MGResult commit_read(const Repository *repo, const char *hash, Commit *commit) {

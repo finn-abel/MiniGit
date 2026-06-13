@@ -142,10 +142,41 @@ static void test_malformed_line_rejected(void) {
     cleanup_temp_repo(original_dir, temp_dir);
 }
 
+static void test_traversal_path_rejected(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    const unsigned char bad_index[] =
+        "100644\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t1\t2\t../victim\n";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    assert_ok(fs_write_file(".minigit/index", bad_index, sizeof(bad_index) - 1), "write traversal index failed");
+    assert_result(index_load(&repo, &index), MG_PARSE_ERROR, "traversal index path should be rejected");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
+static void test_overflowing_numeric_fields_rejected(void) {
+    Repository repo;
+    Index index;
+    char original_dir[MG_MAX_PATH];
+    char temp_dir[MG_MAX_PATH];
+    const unsigned char bad_index[] =
+        "100644\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t"
+        "184467440737095516160\t2\tfile.txt\n";
+
+    make_temp_repo(&repo, original_dir, temp_dir);
+    assert_ok(fs_write_file(".minigit/index", bad_index, sizeof(bad_index) - 1), "write overflowing index failed");
+    assert_result(index_load(&repo, &index), MG_PARSE_ERROR, "overflowing index size should be rejected");
+    cleanup_temp_repo(original_dir, temp_dir);
+}
+
 int main(void) {
     test_empty_load();
     test_save_load_update_remove();
     test_malformed_line_rejected();
+    test_traversal_path_rejected();
+    test_overflowing_numeric_fields_rejected();
     puts("test_index passed");
     return 0;
 }

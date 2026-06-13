@@ -12,6 +12,7 @@
 typedef struct {
     char tree_hash[MG_HASH_HEX_SIZE];
     char parent_hash[MG_HASH_HEX_SIZE];
+    char second_parent_hash[MG_HASH_HEX_SIZE];
     char *author_name;
     char *author_email;
     time_t timestamp;
@@ -25,6 +26,18 @@ MGResult commit_create(
     const Repository *repo,
     const char *tree_hash,
     const char *parent_hash,
+    const char *message,
+    char out_hash[MG_HASH_HEX_SIZE]
+);
+
+/*
+ * commit_create_merge writes a commit with two parents.
+ */
+MGResult commit_create_merge(
+    const Repository *repo,
+    const char *tree_hash,
+    const char *first_parent_hash,
+    const char *second_parent_hash,
     const char *message,
     char out_hash[MG_HASH_HEX_SIZE]
 );
